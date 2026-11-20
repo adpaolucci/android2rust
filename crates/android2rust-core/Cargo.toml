@@ -1,0 +1,25 @@
+[package]
+name = "android2rust-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core job schema, ADB/Fastboot command builder & parser, validator, status decoder, pure-Rust APK/.ab/SQLite forensics, presets, and profile store for android2rust"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+sha2.workspace = true
+flate2.workspace = true
+walkdir.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,6 @@
+{
+  "name": "Android2Rust Management & Forensics Console",
+  "description": "100% pure-Rust native Win32 (WinSafe) & cross-platform Iced ADB/Fastboot GUI wrapper, device orchestrator, offline Android forensics workstation, CLI, and MCP server.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

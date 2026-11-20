@@ -1,0 +1,24 @@
+[package]
+name = "android2rust-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model Context Protocol (MCP) JSON-RPC 2.0 stdio server for android2rust"
+
+[[bin]]
+name = "android2rust-mcp"
+path = "src/main.rs"
+
+[dependencies]
+android2rust-core.workspace = true
+android2rust-runner.workspace = true
+android2rust-report.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

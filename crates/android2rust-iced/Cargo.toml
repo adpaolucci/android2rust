@@ -1,0 +1,24 @@
+[package]
+name = "android2rust-iced"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Cross-platform pure-Rust Iced 0.14 desktop management & Android forensics console (Linux, macOS, and Windows)"
+
+[[bin]]
+name = "android2rust-iced"
+path = "src/main.rs"
+
+[dependencies]
+android2rust-core.workspace = true
+android2rust-runner.workspace = true
+android2rust-report.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+iced.workspace = true
+rfd.workspace = true
+arboard.workspace = true

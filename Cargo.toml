@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/android2rust-core",
+    "crates/android2rust-runner",
+    "crates/android2rust-report",
+    "crates/android2rust-mcp",
+    "crates/android2rust-cli",
+    "crates/android2rust-win32",
+    "crates/android2rust-iced",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/adpaolucci/android2rust"
+homepage = "https://android2rust.guap.ca"
+documentation = "https://android2rust.guap.ca"
+authors = ["Android2Rust Contributors"]
+description = "100% pure-Rust native Win32 (WinSafe) & cross-platform Iced ADB/Fastboot GUI wrapper, device orchestrator, offline Android forensics workstation, CLI, and MCP server"
+keywords = ["android", "adb", "fastboot", "forensics", "mcp"]
+categories = ["command-line-utilities", "gui", "development-tools"]
+
+[workspace.dependencies]
+android2rust-core = { path = "crates/android2rust-core" }
+android2rust-runner = { path = "crates/android2rust-runner" }
+android2rust-report = { path = "crates/android2rust-report" }
+android2rust-mcp = { path = "crates/android2rust-mcp" }
+
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1.13"
+dirs = "7.0"
+sha2 = "0.11"
+flate2 = "1.1"
+walkdir = "2.5"
+tempfile = "3.20"
+clap = { version = "4.6", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ctrlc = "3.4"
+winsafe = { version = "0.0.29", features = ["gui", "shell"] }
+iced = { version = "0.14", features = ["wgpu", "tiny-skia", "tokio"] }
+rfd = "0.18"
+arboard = "3.6"
+
+[profile.dev.package.clap]
+opt-level = 2
+
+[profile.dev.package.clap_builder]
+opt-level = 2
+
+[profile.dev.package.clap_derive]
+opt-level = 2
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

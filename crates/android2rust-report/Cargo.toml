@@ -1,0 +1,21 @@
+[package]
+name = "android2rust-report"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Self-contained offline HTML, JSON, and Markdown audit report generator and artifact/log importer for android2rust"
+
+[dependencies]
+android2rust-core.workspace = true
+android2rust-runner.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

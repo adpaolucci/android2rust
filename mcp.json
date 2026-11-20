@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "android2rust": {
+      "command": "android2rust",
+      "args": [
+        "mcp"
+      ],
+      "env": {
+        "RUST_LOG": "warn"
+      }
+    }
+  }
+}
