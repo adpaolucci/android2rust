@@ -30,13 +30,26 @@ fn view_confirm_destructive(app: &App) -> Element<'_, Message> {
         return column![].into();
     };
     let reasons = pending.destructive_reasons().join(", ");
+    let heading = if app.pending_destructive_batch {
+        "Confirm Destructive Batch Queue Execution"
+    } else {
+        "Confirm Destructive Android Operation"
+    };
+    let trigger_line = if app.pending_destructive_batch {
+        format!("Batch queue includes destructive operation(s): {reasons}")
+    } else {
+        format!("Destructive trigger(s): {reasons}")
+    };
+    let exec_label = if app.pending_destructive_batch {
+        "Execute Destructive Queue"
+    } else {
+        "Execute Destructive Job"
+    };
 
     column![
-        text("Confirm Destructive Android Operation")
-            .size(17)
-            .color(Color::from_rgb(0.75, 0.14, 0.14)),
+        text(heading).size(17).color(Color::from_rgb(0.75, 0.14, 0.14)),
         rule::horizontal(1),
-        text(format!("Destructive trigger(s): {reasons}")).size(13),
+        text(trigger_line).size(13),
         text("Device partitions, bootloader state, or application user data may be permanently altered or erased.")
             .size(13),
         text(format!("Serial/Target: {} | {}", pending.serial, pending.target_path))
@@ -52,7 +65,7 @@ fn view_confirm_destructive(app: &App) -> Element<'_, Message> {
             button(text("Cancel").size(13))
                 .on_press(Message::CloseModal)
                 .style(button::secondary),
-            button(text("Execute Destructive Job").size(13))
+            button(text(exec_label).size(13))
                 .on_press(Message::ConfirmDestructiveExecute)
                 .style(button::danger),
         ]

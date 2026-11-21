@@ -1215,6 +1215,7 @@ impl Win32App {
 
         let _ = self.designer.job_name.set_text(&j.name);
         let _ = self.designer.job_desc.set_text(&j.description);
+        let _ = self.designer.import_cmd.set_text(&st.cached_command);
 
         self.adb_pg.third_party.set_check(j.package_opts.third_party_only);
         self.adb_pg.system_only.set_check(j.package_opts.system_only);
@@ -1412,7 +1413,6 @@ impl Win32App {
     fn refresh_derived_views(&self) {
         let st = self.state.lock().unwrap();
         let _ = self.cmd_edit.set_text(&st.cached_command);
-        let _ = self.designer.import_cmd.set_text(&st.cached_command);
         self.update_schtasks_preview(&st.cached_command);
 
         self.designer.diag_list.set_redraw(false);
@@ -1564,7 +1564,7 @@ impl Win32App {
             }
             st.job.with_dry_run()
         };
-        self.start_execution(dry);
+        let _ = self.start_execution(dry);
     }
 
     fn trigger_execute(&self) {
@@ -1600,16 +1600,73 @@ impl Win32App {
                 "Confirm Destructive Android Operation",
                 co::MB::YESNOCANCEL | co::MB::ICONWARNING,
             ) {
-                Ok(co::DLGID::YES) => self.start_execution(job),
-                Ok(co::DLGID::NO) => self.start_execution(job.with_dry_run()),
+                Ok(co::DLGID::YES) => {
+                    let _ = self.start_execution(job);
+                }
+                Ok(co::DLGID::NO) => {
+                    let _ = self.start_execution(job.with_dry_run());
+                }
                 _ => {}
             }
             return;
         }
-        self.start_execution(job);
+        let _ = self.start_execution(job);
     }
 
-    fn start_execution(&self, job: AndroidJob) {
+    fn start_batch_from(&self, mut idx: usize) {
+        loop {
+            let next_job = {
+                let mut st = self.state.lock().unwrap();
+                if !st.batch_running || idx >= st.batch_items.len() {
+                    st.batch_running = false;
+                    st.active_batch_idx = None;
+                    self.refresh_status_bar(&st);
+                    None
+                } else {
+                    st.active_batch_idx = Some(idx);
+                    st.batch_items[idx].status = BatchStatus::Running;
+                    st.batch_items[idx].note = "Running...".to_string();
+                    let mut j = st.batch_items[idx].job.clone();
+                    if st.batch_dry_run {
+                        j = j.with_dry_run();
+                    } else {
+                        j.dry_run = false;
+                    }
+                    Some(j)
+                }
+            };
+            self.refresh_batch_and_history_lists();
+            let Some(job) = next_job else {
+                return;
+            };
+            if self.start_execution(job) {
+                return;
+            }
+            let should_continue = {
+                let mut st = self.state.lock().unwrap();
+                if idx < st.batch_items.len() {
+                    st.batch_items[idx].status = BatchStatus::Failed(1);
+                    st.batch_items[idx].note = "Validation Error".to_string();
+                }
+                if st.batch_stop_on_error {
+                    st.batch_running = false;
+                    st.active_batch_idx = None;
+                    st.status_message = format!("Batch stopped at item #{} (validation error).", idx + 1);
+                    self.refresh_status_bar(&st);
+                    false
+                } else {
+                    true
+                }
+            };
+            self.refresh_batch_and_history_lists();
+            if !should_continue {
+                return;
+            }
+            idx += 1;
+        }
+    }
+
+    fn start_execution(&self, job: AndroidJob) -> bool {
         let errs: Vec<_> = android2rust_core::validate_job(&job)
             .into_iter()
             .filter(|f| f.severity == ValidationSeverity::Error)
@@ -1619,7 +1676,7 @@ impl Win32App {
                 .wnd
                 .hwnd()
                 .MessageBox(&errs[0].message, "Validation Error", co::MB::ICONERROR);
-            return;
+            return false;
         }
 
         self.select_tab_index(TAB_CONSOLE_IDX);
@@ -1718,6 +1775,7 @@ impl Win32App {
                 });
             }
         });
+        true
     }
 
     fn apply_runner_batch(
@@ -1765,7 +1823,7 @@ impl Win32App {
             .collect::<Vec<_>>()
             .join("\r\n");
         let _ = self.console_pg.raw_log_edit.set_text(&tail);
-        let len = tail.len() as i32;
+        let len = tail.encode_utf16().count() as i32;
         self.console_pg.raw_log_edit.set_selection(len, len);
 
         let sum_txt = format!(
@@ -1781,7 +1839,7 @@ impl Win32App {
     }
 
     fn finish_runner(&self, res: RunResult) {
-        let next_batch = {
+        let next_start_idx = {
             let mut st = self.state.lock().unwrap();
             st.is_running = false;
             st.cancel_token = None;
@@ -1832,7 +1890,7 @@ impl Win32App {
             let recs = res.file_actions.len();
             st.last_result = Some(res);
 
-            let mut next_job = None;
+            let mut next_idx_opt = None;
             if st.batch_running
                 && let Some(idx) = st.active_batch_idx
             {
@@ -1849,16 +1907,7 @@ impl Win32App {
                     st.active_batch_idx = None;
                     st.status_message = format!("Batch stopped at item #{} (exit code {code}).", idx + 1);
                 } else if idx + 1 < st.batch_items.len() {
-                    let next_idx = idx + 1;
-                    st.active_batch_idx = Some(next_idx);
-                    st.batch_items[next_idx].status = BatchStatus::Running;
-                    st.batch_items[next_idx].note = "Running...".to_string();
-                    let j = if st.batch_dry_run {
-                        st.batch_items[next_idx].job.with_dry_run()
-                    } else {
-                        st.batch_items[next_idx].job.clone()
-                    };
-                    next_job = Some(j);
+                    next_idx_opt = Some(idx + 1);
                 } else {
                     st.batch_running = false;
                     st.active_batch_idx = None;
@@ -1866,12 +1915,12 @@ impl Win32App {
                 }
             }
             self.refresh_status_bar(&st);
-            next_job
+            next_idx_opt
         };
 
         self.refresh_batch_and_history_lists();
-        if let Some(j) = next_batch {
-            self.start_execution(j);
+        if let Some(next_idx) = next_start_idx {
+            self.start_batch_from(next_idx);
         }
     }
 
@@ -2074,7 +2123,28 @@ impl Win32App {
         wire_cmb(&self.adb_pg.reboot_combo);
         wire_edit(&self.serial_edit);
         wire_edit(&self.src_edit);
-        wire_edit(&self.tgt_edit);
+        {
+            let app = self.clone();
+            self.tgt_edit.on().en_change(move || {
+                if app.suppress_sync.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                let is_fastboot = app
+                    .op_combo
+                    .items()
+                    .selected_index()
+                    .and_then(|idx| AndroidOperation::ALL.get(idx as usize))
+                    .is_some_and(|op| op.default_tool() == android2rust_core::ToolFamily::Fastboot);
+                if is_fastboot {
+                    let val = app.tgt_edit.text().unwrap_or_default();
+                    app.suppress_sync.store(true, Ordering::SeqCst);
+                    let _ = app.fastboot_pg.partition.set_text(&val);
+                    app.suppress_sync.store(false, Ordering::SeqCst);
+                }
+                app.sync_controls_to_job();
+                Ok(())
+            });
+        }
         wire_edit(&self.designer.job_name);
         wire_edit(&self.designer.job_desc);
 
@@ -2111,17 +2181,61 @@ impl Win32App {
             &self.transfer_pg.log_format,
             &self.transfer_pg.log_max_lines,
             &self.transfer_pg.log_filters,
-            &self.fastboot_pg.partition,
             &self.fastboot_pg.slot,
             &self.forensics_pg.max_entries,
             &self.forensics_pg.extra_args,
         ] {
             wire_edit(ed);
         }
+        {
+            let app = self.clone();
+            self.fastboot_pg.partition.on().en_change(move || {
+                if app.suppress_sync.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
+                let is_fastboot = app
+                    .op_combo
+                    .items()
+                    .selected_index()
+                    .and_then(|idx| AndroidOperation::ALL.get(idx as usize))
+                    .is_some_and(|op| op.default_tool() == android2rust_core::ToolFamily::Fastboot);
+                if is_fastboot {
+                    let val = app.fastboot_pg.partition.text().unwrap_or_default();
+                    app.suppress_sync.store(true, Ordering::SeqCst);
+                    let _ = app.tgt_edit.set_text(&val);
+                    app.suppress_sync.store(false, Ordering::SeqCst);
+                }
+                app.sync_controls_to_job();
+                Ok(())
+            });
+        }
+
+        {
+            let app = self.clone();
+            self.adb_pg.third_party.on().bn_clicked(move || {
+                if app.adb_pg.third_party.is_checked() && app.adb_pg.system_only.is_checked() {
+                    app.suppress_sync.store(true, Ordering::SeqCst);
+                    app.adb_pg.system_only.set_check(false);
+                    app.suppress_sync.store(false, Ordering::SeqCst);
+                }
+                app.sync_controls_to_job();
+                Ok(())
+            });
+        }
+        {
+            let app = self.clone();
+            self.adb_pg.system_only.on().bn_clicked(move || {
+                if app.adb_pg.system_only.is_checked() && app.adb_pg.third_party.is_checked() {
+                    app.suppress_sync.store(true, Ordering::SeqCst);
+                    app.adb_pg.third_party.set_check(false);
+                    app.suppress_sync.store(false, Ordering::SeqCst);
+                }
+                app.sync_controls_to_job();
+                Ok(())
+            });
+        }
 
         for cb in [
-            &self.adb_pg.third_party,
-            &self.adb_pg.system_only,
             &self.adb_pg.show_apk_path,
             &self.adb_pg.show_installer,
             &self.adb_pg.show_uid,
@@ -2416,7 +2530,45 @@ impl Win32App {
         ] {
             let app = self.clone();
             button.on().bn_clicked(move || {
-                let first_job = {
+                let first_destructive = {
+                    let st = app.state.lock().unwrap();
+                    if st.is_running || st.batch_items.is_empty() {
+                        return Ok(());
+                    }
+                    if dry_mode {
+                        None
+                    } else {
+                        st.batch_items.iter().find_map(|item| {
+                            let mut live = item.job.clone();
+                            live.dry_run = false;
+                            live.is_destructive().then_some((
+                                live.destructive_reasons().join(", "),
+                                live.serial,
+                                live.source_path,
+                                live.target_path,
+                            ))
+                        })
+                    }
+                };
+
+                let effective_dry = if let Some((reasons, serial, source_path, target_path)) = first_destructive {
+                    let msg_txt = format!(
+                        "Batch queue contains destructive Android operation(s): {reasons}\n\nFirst destructive item:\nSerial: {serial}\nSource/Image: {source_path}\nTarget/Partition: {target_path}\n\nClick YES to Execute the live batch queue.\nClick NO to run the entire queue in safe Dry-Run mode instead.\nClick CANCEL to abort."
+                    );
+                    match app.wnd.hwnd().MessageBox(
+                        &msg_txt,
+                        "Confirm Destructive Batch Queue",
+                        co::MB::YESNOCANCEL | co::MB::ICONWARNING,
+                    ) {
+                        Ok(co::DLGID::YES) => false,
+                        Ok(co::DLGID::NO) => true,
+                        _ => return Ok(()),
+                    }
+                } else {
+                    dry_mode
+                };
+
+                {
                     let mut st = app.state.lock().unwrap();
                     if st.is_running || st.batch_items.is_empty() {
                         return Ok(());
@@ -2426,18 +2578,10 @@ impl Win32App {
                         item.note = "Pending".to_string();
                     }
                     st.batch_running = true;
-                    st.batch_dry_run = dry_mode;
-                    st.active_batch_idx = Some(0);
-                    st.batch_items[0].status = BatchStatus::Running;
-                    st.batch_items[0].note = "Running...".to_string();
-                    if dry_mode {
-                        st.batch_items[0].job.with_dry_run()
-                    } else {
-                        st.batch_items[0].job.clone()
-                    }
-                };
-                app.refresh_batch_and_history_lists();
-                app.start_execution(first_job);
+                    st.batch_dry_run = effective_dry;
+                    st.active_batch_idx = None;
+                }
+                app.start_batch_from(0);
                 Ok(())
             });
         }

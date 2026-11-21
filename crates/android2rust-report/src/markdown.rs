@@ -1,6 +1,10 @@
 use android2rust_core::format::{format_bytes, format_duration};
 use android2rust_runner::RunResult;
 
+fn md_cell(s: &str) -> String {
+    s.replace(['\r', '\n'], " ").replace('|', "\\|")
+}
+
 pub fn render_markdown(result: &RunResult) -> String {
     let mut out = String::new();
     let mode = if result.dry_run {
@@ -84,6 +88,12 @@ pub fn render_markdown(result: &RunResult) -> String {
                 out.push_str(&format!("- `{item}`\n"));
             }
         }
+        if !forensic.warnings.is_empty() {
+            out.push_str("\n### Forensic Warnings\n\n");
+            for warn in &forensic.warnings {
+                out.push_str(&format!("- `{warn}`\n"));
+            }
+        }
         out.push('\n');
     }
 
@@ -102,13 +112,15 @@ pub fn render_markdown(result: &RunResult) -> String {
         for rec in &result.file_actions {
             let sz = rec.size_bytes.map(format_bytes).unwrap_or_else(|| "-".to_string());
             let ts = rec.timestamp.as_deref().unwrap_or("-");
+            let path_cell = md_cell(&rec.path).replace('`', "'");
+            let detail_cell = md_cell(&rec.detail);
             out.push_str(&format!(
                 "| {} | {} | {} | `{}` | {} |\n",
                 rec.kind.label(),
                 sz,
                 ts,
-                rec.path,
-                rec.detail.replace('|', "\\|")
+                path_cell,
+                detail_cell
             ));
         }
         out.push('\n');

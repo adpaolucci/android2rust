@@ -423,14 +423,36 @@ fn parse_adb_subcommand(rest: &[String], job: &mut AndroidJob, unrecognized: &mu
             } else if tail.len() >= 2 && tail[0] == "pm" && tail[1] == "disable-user" {
                 job.operation = AndroidOperation::DisablePackage;
                 job.name = "Parsed Disable Package".to_string();
-                if let Some(last) = tail.last() {
-                    job.target_path = last.clone();
+                let mut i = 2;
+                while i < tail.len() {
+                    if tail[i] == "--user" && i + 1 < tail.len() {
+                        job.package_opts.user_id = tail[i + 1].parse().ok();
+                        i += 2;
+                    } else {
+                        if !tail[i].starts_with('-') && job.target_path.is_empty() {
+                            job.target_path = tail[i].clone();
+                        } else {
+                            unrecognized.push(tail[i].clone());
+                        }
+                        i += 1;
+                    }
                 }
             } else if tail.len() >= 2 && tail[0] == "pm" && tail[1] == "enable" {
                 job.operation = AndroidOperation::EnablePackage;
                 job.name = "Parsed Enable Package".to_string();
-                if let Some(last) = tail.last() {
-                    job.target_path = last.clone();
+                let mut i = 2;
+                while i < tail.len() {
+                    if tail[i] == "--user" && i + 1 < tail.len() {
+                        job.package_opts.user_id = tail[i + 1].parse().ok();
+                        i += 2;
+                    } else {
+                        if !tail[i].starts_with('-') && job.target_path.is_empty() {
+                            job.target_path = tail[i].clone();
+                        } else {
+                            unrecognized.push(tail[i].clone());
+                        }
+                        i += 1;
+                    }
                 }
             } else {
                 job.operation = AndroidOperation::Shell;
@@ -549,5 +571,15 @@ mod tests {
         assert!(!fb.job.description.contains("adb devices -l"));
         assert_eq!(fb.job.fastboot_opts.slot.as_deref(), Some("b"));
         assert_eq!(fb.job.source_path, "boot.img");
+
+        let disable = parse_command_line("adb shell pm disable-user --user 10 com.example.bloat");
+        assert!(disable.unrecognized_tokens.is_empty());
+        assert_eq!(disable.job.operation, AndroidOperation::DisablePackage);
+        assert_eq!(disable.job.package_opts.user_id, Some(10));
+        assert_eq!(disable.job.target_path, "com.example.bloat");
+        assert_eq!(
+            format_command_line(&disable.job),
+            "adb shell pm disable-user --user 10 com.example.bloat"
+        );
     }
 }

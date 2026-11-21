@@ -40,10 +40,12 @@ pub fn get_tools_manifest() -> Value {
                 "type": "object",
                 "properties": {
                     "job": { "type": "object", "description": "Optional full AndroidJob JSON object" },
+                    "op": { "type": "string", "description": "Optional operation slug (e.g. devices, install, pull, fastboot-flash, inspect)" },
                     "preset": { "type": "string", "description": "Optional built-in preset ID or name" },
                     "source": { "type": "string", "description": "Local file/artifact/APK/image or remote pull path" },
                     "target": { "type": "string", "description": "Destination path, package ID, partition, or shell cmd" },
                     "serial": { "type": "string", "description": "Target Android device serial (-s)" },
+                    "slot": { "type": "string", "description": "Optional Fastboot A/B slot (--slot a | b | all)" },
                     "dry_run": { "type": "boolean", "description": "Enable non-destructive dry-run mode" },
                     "include_scripts": { "type": "boolean", "description": "Include .a2r, .bat, .ps1, and .sh outputs" },
                     "task_name": { "type": "string", "description": "Optional Task Scheduler task name to generate schtasks command" },
@@ -108,10 +110,12 @@ pub fn get_tools_manifest() -> Value {
                 "type": "object",
                 "properties": {
                     "job": { "type": "object" },
+                    "op": { "type": "string", "description": "Optional operation slug (e.g. devices, install, pull, fastboot-flash, inspect)" },
                     "command": { "type": "string" },
                     "source": { "type": "string" },
                     "target": { "type": "string" },
                     "serial": { "type": "string" },
+                    "slot": { "type": "string", "description": "Optional Fastboot A/B slot (--slot a | b | all)" },
                     "preset": { "type": "string" }
                 }
             }
@@ -123,10 +127,12 @@ pub fn get_tools_manifest() -> Value {
                 "type": "object",
                 "properties": {
                     "job": { "type": "object" },
+                    "op": { "type": "string", "description": "Optional operation slug (e.g. devices, install, pull, fastboot-flash, inspect)" },
                     "command": { "type": "string" },
                     "source": { "type": "string" },
                     "target": { "type": "string" },
                     "serial": { "type": "string" },
+                    "slot": { "type": "string", "description": "Optional Fastboot A/B slot (--slot a | b | all)" },
                     "preset": { "type": "string" },
                     "confirm_destructive": { "type": "boolean", "description": "Explicitly confirm destructive ADB/Fastboot execution" }
                 }
@@ -164,6 +170,13 @@ fn resolve_job_from_args(args: &Value) -> Result<AndroidJob, String> {
         AndroidJob::default()
     };
 
+    if let Some(op_slug) = args["op"].as_str()
+        && !op_slug.trim().is_empty()
+    {
+        let op = AndroidOperation::from_slug(op_slug).ok_or_else(|| format!("Unknown operation slug: {op_slug}"))?;
+        job.operation = op;
+        job.tool = op.default_tool();
+    }
     if let Some(src) = args["source"].as_str()
         && !src.trim().is_empty()
     {
@@ -181,6 +194,11 @@ fn resolve_job_from_args(args: &Value) -> Result<AndroidJob, String> {
         && !serial.trim().is_empty()
     {
         job.serial = serial.trim().to_string();
+    }
+    if let Some(slot) = args["slot"].as_str()
+        && !slot.trim().is_empty()
+    {
+        job.fastboot_opts.slot = Some(slot.trim().to_string());
     }
     if let Some(dry) = args["dry_run"].as_bool()
         && dry
@@ -587,5 +605,32 @@ mod tests {
         .unwrap();
         assert_eq!(rep_resp["result"]["isError"], false);
         assert!(out_html.is_file());
+    }
+
+    #[test]
+    fn mcp_build_command_supports_op_and_slot_arguments() {
+        let resp = handle_jsonrpc_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "android2rust_build_command",
+                "arguments": {
+                    "op": "fastboot-flash",
+                    "slot": "b",
+                    "target": "init_boot",
+                    "source": "init_boot.img"
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], false);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            parsed["command_line"],
+            "fastboot --slot b flash init_boot init_boot.img"
+        );
+        assert_eq!(parsed["destructive"], true);
     }
 }

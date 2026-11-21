@@ -83,11 +83,24 @@ pub fn render_html(result: &RunResult) -> String {
                 "<h3 style=\"margin:12px 0 6px 0;font-size:13px;\">Extracted Permissions / SQLite Tables</h3><ul>{items}</ul>"
             )
         };
+        let warnings_html = if rep.warnings.is_empty() {
+            String::new()
+        } else {
+            let items: String = rep
+                .warnings
+                .iter()
+                .map(|w| format!("<li><code>{}</code></li>", esc(w)))
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                "<h3 style=\"margin:12px 0 6px 0;font-size:13px;\">Forensic Warnings</h3><ul class=\"errors\">{items}</ul>"
+            )
+        };
         format!(
             "<div class=\"card\"><h2 style=\"margin:0 0 8px 0;font-size:15px;\">Pure-Rust Forensic Inspection ({})</h2>\
              <div class=\"muted\">Artifact SHA-256: <span class=\"mono\">{}</span></div>\
              <table style=\"margin-top:8px;\"><thead><tr><th>Attribute</th><th>Value</th></tr></thead><tbody>{meta_rows}</tbody></table>\
-             {perms}</div>",
+             {perms}{warnings_html}</div>",
             esc(rep.kind.label()),
             esc(&rep.sha256),
         )

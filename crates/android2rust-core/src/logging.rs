@@ -5,7 +5,9 @@ use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
 pub fn init_logging(level: &str, log_file: Option<&Path>) -> Result<()> {
-    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("warn"));
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(level))
+        .unwrap_or_else(|_| EnvFilter::new("warn"));
 
     if let Some(path) = log_file {
         if let Some(parent) = path.parent()

@@ -80,6 +80,7 @@ pub struct App {
 
     // Modals
     pub pending_destructive_job: Option<AndroidJob>,
+    pub pending_destructive_batch: bool,
     pub import_cmd_text: String,
     pub save_profile_name: String,
     pub save_profile_desc: String,
@@ -185,6 +186,7 @@ impl App {
             active_batch_index: None,
 
             pending_destructive_job: None,
+            pending_destructive_batch: false,
             import_cmd_text: String::new(),
             save_profile_name: String::new(),
             save_profile_desc: String::new(),
@@ -280,14 +282,14 @@ impl App {
         }
     }
 
-    fn start_execution(&mut self, job: AndroidJob) {
+    fn start_execution(&mut self, job: AndroidJob) -> bool {
         let errs: Vec<_> = validate_job(&job)
             .into_iter()
             .filter(|f| f.severity == ValidationSeverity::Error)
             .collect();
         if !errs.is_empty() {
             self.status_message = format!("Validation error: {}", errs[0].message);
-            return;
+            return false;
         }
 
         self.live_progress_pct = 0.0;
@@ -304,6 +306,47 @@ impl App {
         self.cancel_token = Some(cancel);
         self.is_running = true;
         self.status_message = format!("Running: {}", format_command_line(&job));
+        true
+    }
+
+    fn launch_batch_queue(&mut self, dry_mode: bool) {
+        if self.is_running || self.batch_items.is_empty() {
+            return;
+        }
+        for item in &mut self.batch_items {
+            item.status = BatchItemStatus::Pending;
+            item.summary_note = "Pending".to_string();
+        }
+        self.batch_running = true;
+        self.batch_dry_run_mode = dry_mode;
+        self.start_batch_item(0);
+    }
+
+    fn start_batch_item(&mut self, mut idx: usize) {
+        while idx < self.batch_items.len() {
+            self.active_batch_index = Some(idx);
+            self.batch_items[idx].status = BatchItemStatus::Running;
+            self.batch_items[idx].summary_note = "Running...".to_string();
+            let mut next_job = self.batch_items[idx].job.clone();
+            if self.batch_dry_run_mode {
+                next_job = next_job.with_dry_run();
+            } else {
+                next_job.dry_run = false;
+            }
+            if self.start_execution(next_job) {
+                return;
+            }
+            self.batch_items[idx].status = BatchItemStatus::Failed(1);
+            self.batch_items[idx].summary_note = "Validation Error".to_string();
+            if self.batch_stop_on_error {
+                self.batch_running = false;
+                self.active_batch_index = None;
+                return;
+            }
+            idx += 1;
+        }
+        self.batch_running = false;
+        self.active_batch_index = None;
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -323,6 +366,7 @@ impl App {
             Message::CloseModal => {
                 self.active_modal = ActiveModal::None;
                 self.pending_destructive_job = None;
+                self.pending_destructive_batch = false;
             }
 
             Message::OperationChanged(op) => {
@@ -381,7 +425,7 @@ impl App {
 
             Message::TriggerDryRun => {
                 if !self.is_running {
-                    self.start_execution(self.job.with_dry_run());
+                    let _ = self.start_execution(self.job.with_dry_run());
                 }
             }
             Message::TriggerExecute => {
@@ -389,23 +433,34 @@ impl App {
                     let mut live = self.job.clone();
                     live.dry_run = false;
                     if live.is_destructive() {
+                        self.pending_destructive_batch = false;
                         self.pending_destructive_job = Some(live);
                         self.active_modal = ActiveModal::ConfirmDestructive;
                     } else {
-                        self.start_execution(live);
+                        let _ = self.start_execution(live);
                     }
                 }
             }
             Message::ConfirmDestructiveExecute => {
                 self.active_modal = ActiveModal::None;
-                if let Some(job) = self.pending_destructive_job.take() {
-                    self.start_execution(job);
+                let is_batch = self.pending_destructive_batch;
+                self.pending_destructive_batch = false;
+                let pending = self.pending_destructive_job.take();
+                if is_batch {
+                    self.launch_batch_queue(false);
+                } else if let Some(job) = pending {
+                    let _ = self.start_execution(job);
                 }
             }
             Message::DryRunPendingInstead => {
                 self.active_modal = ActiveModal::None;
-                if let Some(job) = self.pending_destructive_job.take() {
-                    self.start_execution(job.with_dry_run());
+                let is_batch = self.pending_destructive_batch;
+                self.pending_destructive_batch = false;
+                let pending = self.pending_destructive_job.take();
+                if is_batch {
+                    self.launch_batch_queue(true);
+                } else if let Some(job) = pending {
+                    let _ = self.start_execution(job.with_dry_run());
                 }
             }
             Message::StopExecution => {
@@ -517,14 +572,7 @@ impl App {
                         }
                         let next_idx = idx + 1;
                         if next_idx < self.batch_items.len() && (is_ok || !self.batch_stop_on_error) {
-                            self.active_batch_index = Some(next_idx);
-                            self.batch_items[next_idx].status = BatchItemStatus::Running;
-                            let next_job = if self.batch_dry_run_mode {
-                                self.batch_items[next_idx].job.with_dry_run()
-                            } else {
-                                self.batch_items[next_idx].job.clone()
-                            };
-                            self.start_execution(next_job);
+                            self.start_batch_item(next_idx);
                         } else {
                             self.batch_running = false;
                             self.active_batch_index = None;
@@ -784,7 +832,10 @@ impl App {
             }
 
             Message::PartitionChanged(s) => {
-                self.job.fastboot_opts.partition = s;
+                self.job.fastboot_opts.partition = s.clone();
+                if self.job.tool == ToolFamily::Fastboot {
+                    self.job.target_path = s;
+                }
                 self.refresh_derived();
             }
             Message::SlotChanged(s) => {
@@ -872,19 +923,19 @@ impl App {
             Message::ToggleStopOnError(b) => self.batch_stop_on_error = b,
             Message::StartBatchQueue(dry_mode) => {
                 if !self.is_running && !self.batch_items.is_empty() {
-                    for item in &mut self.batch_items {
-                        item.status = BatchItemStatus::Pending;
-                    }
-                    self.batch_running = true;
-                    self.batch_dry_run_mode = dry_mode;
-                    self.active_batch_index = Some(0);
-                    self.batch_items[0].status = BatchItemStatus::Running;
-                    let first = if dry_mode {
-                        self.batch_items[0].job.with_dry_run()
+                    if !dry_mode
+                        && let Some(first_destr) = self.batch_items.iter().find_map(|item| {
+                            let mut live = item.job.clone();
+                            live.dry_run = false;
+                            live.is_destructive().then_some(live)
+                        })
+                    {
+                        self.pending_destructive_batch = true;
+                        self.pending_destructive_job = Some(first_destr);
+                        self.active_modal = ActiveModal::ConfirmDestructive;
                     } else {
-                        self.batch_items[0].job.clone()
-                    };
-                    self.start_execution(first);
+                        self.launch_batch_queue(dry_mode);
+                    }
                 }
             }
             Message::MoveQueueUp(idx) => {
@@ -1252,5 +1303,30 @@ mod tests {
 
         let _ = app.update(Message::AddCurrentToQueue);
         assert_eq!(app.batch_items.len(), 1);
+    }
+
+    #[test]
+    fn live_batch_queue_guards_destructive_and_handles_validation_errors() {
+        let (mut app, _) = App::new(LaunchArgs {
+            source: Some("boot.img".to_string()),
+            target: Some("boot".to_string()),
+            ..Default::default()
+        });
+        let flash_idx = app.presets.iter().position(|p| p.id == "fastboot-flash-image").unwrap();
+        let _ = app.update(Message::ApplyPreset(flash_idx));
+        let _ = app.update(Message::AddCurrentToQueue);
+
+        let _ = app.update(Message::StartBatchQueue(false));
+        assert_eq!(app.active_modal, ActiveModal::ConfirmDestructive);
+        assert!(app.pending_destructive_batch);
+        assert!(!app.is_running);
+
+        // Queue with validation error (missing image file) marks Failed and clears batch_running
+        let _ = app.update(Message::CloseModal);
+        app.batch_items[0].job.source_path.clear();
+        let _ = app.update(Message::StartBatchQueue(true));
+        assert_eq!(app.batch_items[0].status, BatchItemStatus::Failed(1));
+        assert!(!app.batch_running);
+        assert!(!app.is_running);
     }
 }

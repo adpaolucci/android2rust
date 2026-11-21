@@ -111,8 +111,11 @@ pub fn parse_log_file_to_run_result(path: &Path) -> Result<RunResult> {
 
     let bytes = std::fs::read(path).with_context(|| format!("Failed to read log file {}", path.display()))?;
     if bytes.starts_with(b"ANDROID BACKUP\n")
+        || bytes.starts_with(b"ANDROID BACKUP\r\n")
         || bytes.starts_with(b"SQLite format 3\0")
         || bytes.starts_with(b"PK\x03\x04")
+        || bytes.starts_with(b"PK\x05\x06")
+        || (bytes.len() >= 8 && bytes.starts_with(&[0x03, 0x00, 0x08, 0x00]))
     {
         let job = AndroidJob {
             name: path

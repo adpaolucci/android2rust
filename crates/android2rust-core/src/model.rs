@@ -445,7 +445,18 @@ impl AndroidJob {
             }
             AndroidOperation::Shell => {
                 let lower = self.target_path.to_ascii_lowercase();
-                for pat in ["rm -rf", "rm -r ", "dd ", "pm clear", "wipe", "format ", "flash_image"] {
+                for pat in [
+                    "rm -rf",
+                    "rm -fr",
+                    "rm -r ",
+                    "dd ",
+                    "pm clear",
+                    "pm uninstall",
+                    "cmd package uninstall",
+                    "wipe",
+                    "format ",
+                    "flash_image",
+                ] {
                     if lower.contains(pat) {
                         reasons.push(format!("adb shell contains destructive token '{pat}'"));
                         break;

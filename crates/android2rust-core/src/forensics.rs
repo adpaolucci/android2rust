@@ -176,6 +176,7 @@ fn inspect_ab_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOp
     let mut metadata = Vec::new();
     let mut warnings = Vec::new();
     let mut entries = Vec::new();
+    let mut permissions_or_tables = Vec::new();
 
     // Parse 4-line header: ANDROID BACKUP \n version \n compressed \n encryption \n
     let mut pos = 0usize;
@@ -215,9 +216,10 @@ fn inspect_ab_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOp
         match tar_bytes_res {
             Ok(tar_bytes) => {
                 metadata.push(("TAR Payload Size".to_string(), format_bytes(tar_bytes.len() as u64)));
-                let tar_entries = parse_tar_headers(&tar_bytes, opts.max_entries);
+                let (tar_entries, nested) = parse_tar_headers(&tar_bytes, opts);
                 metadata.push(("TAR Entries Discovered".to_string(), tar_entries.len().to_string()));
                 entries = tar_entries;
+                permissions_or_tables = nested;
             }
             Err(err) => {
                 warnings.push(format!("Failed to inflate .ab zlib stream: {err}"));
@@ -231,17 +233,19 @@ fn inspect_ab_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOp
         total_bytes: bytes.len() as u64,
         sha256,
         metadata,
-        permissions_or_tables: Vec::new(),
+        permissions_or_tables,
         entries,
         warnings,
     }
 }
 
-fn parse_tar_headers(data: &[u8], max_entries: usize) -> Vec<ForensicEntry> {
+fn parse_tar_headers(data: &[u8], opts: &ForensicOptions) -> (Vec<ForensicEntry>, Vec<String>) {
+    const MAX_NESTED_INSPECT_BYTES: u64 = 32 * 1024 * 1024;
     let mut out = Vec::new();
+    let mut nested = BTreeSet::new();
     let mut offset = 0usize;
 
-    while offset + 512 <= data.len() && out.len() < max_entries {
+    while offset + 512 <= data.len() && out.len() < opts.max_entries {
         let header = &data[offset..offset + 512];
         if header.iter().all(|&b| b == 0) {
             break;
@@ -262,11 +266,41 @@ fn parse_tar_headers(data: &[u8], max_entries: usize) -> Vec<ForensicEntry> {
             _ => "TAR File",
         };
 
+        let mut detail = format_bytes(size);
+        let payload_start = offset + 512;
+        if !matches!(typeflag, b'5' | b'2')
+            && size > 0
+            && size <= MAX_NESTED_INSPECT_BYTES
+            && let Ok(plen) = usize::try_from(size)
+            && let Some(payload_end) = payload_start.checked_add(plen)
+            && payload_end <= data.len()
+        {
+            let file_bytes = &data[payload_start..payload_end];
+            if opts.inspect_sqlite_tables && file_bytes.starts_with(b"SQLite format 3\0") {
+                let (wal_mode, tables, _) = scan_sqlite_schema_tables(file_bytes);
+                for tbl in tables {
+                    nested.insert(tbl);
+                }
+                detail = if wal_mode {
+                    format!("{detail} [SQLite 3, WAL]")
+                } else {
+                    format!("{detail} [SQLite 3]")
+                };
+            } else if opts.extract_manifest_permissions
+                && (full_name == "AndroidManifest.xml" || full_name.ends_with("/AndroidManifest.xml"))
+            {
+                let perms = scan_android_permissions(file_bytes);
+                let count = perms.len();
+                nested.extend(perms);
+                detail = format!("{detail} [{count} permissions]");
+            }
+        }
+
         if !full_name.is_empty() {
             out.push(ForensicEntry {
                 category: kind.to_string(),
                 name: full_name,
-                detail: format_bytes(size),
+                detail,
                 size_bytes: Some(size),
             });
         }
@@ -277,7 +311,7 @@ fn parse_tar_headers(data: &[u8], max_entries: usize) -> Vec<ForensicEntry> {
             .saturating_add(data_blocks.saturating_mul(512));
     }
 
-    out
+    (out, nested.into_iter().collect())
 }
 
 fn read_c_string(slice: &[u8]) -> String {
@@ -528,8 +562,6 @@ fn collect_permissions_from_str(text: &str, out: &mut BTreeSet<String>) {
 
 fn inspect_sqlite_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOptions) -> ForensicReport {
     let mut metadata = Vec::new();
-    let mut tables = BTreeSet::new();
-    let mut entries = Vec::new();
     let mut warnings = Vec::new();
 
     if bytes.len() >= 100 {
@@ -559,46 +591,12 @@ fn inspect_sqlite_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &Forens
         }
     }
 
+    let mut entries = Vec::new();
+    let mut tables = Vec::new();
     if opts.inspect_sqlite_tables {
-        let lossy = String::from_utf8_lossy(bytes);
-        let upper = lossy.to_ascii_uppercase();
-        for stmt_prefix in ["CREATE TABLE ", "CREATE VIRTUAL TABLE ", "CREATE VIEW "] {
-            let mut idx = 0usize;
-            while let Some(found) = upper[idx..].find(stmt_prefix) {
-                let start = idx + found;
-                let trimmed_after = lossy[start + stmt_prefix.len()..].trim_start();
-                let after = if trimmed_after.len() >= 14 && trimmed_after[..14].eq_ignore_ascii_case("IF NOT EXISTS ") {
-                    trimmed_after[14..].trim_start()
-                } else {
-                    trimmed_after
-                };
-                let name_end = after
-                    .find(|c: char| c.is_whitespace() || c == '(')
-                    .unwrap_or(after.len().min(80));
-                let raw_tbl = after[..name_end].trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']');
-                let tbl = raw_tbl
-                    .strip_prefix("main.")
-                    .or_else(|| raw_tbl.strip_prefix("MAIN."))
-                    .unwrap_or(raw_tbl)
-                    .trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']');
-                if !tbl.is_empty() && tbl.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                    tables.insert(tbl.to_string());
-                    let stmt_end = lossy[start..]
-                        .find(')')
-                        .map(|p| (start + p + 1).min(start + 220))
-                        .unwrap_or((start + 120).min(lossy.len()));
-                    let snippet = lossy[start..stmt_end].replace(['\r', '\n'], " ");
-                    entries.push(ForensicEntry {
-                        category: "SQLite Schema".to_string(),
-                        name: tbl.to_string(),
-                        detail: snippet,
-                        size_bytes: None,
-                    });
-                }
-                let after_start = lossy.len() - after.len();
-                idx = (after_start + name_end.max(1)).min(lossy.len());
-            }
-        }
+        let (_, detected_tables, schema_entries) = scan_sqlite_schema_tables(bytes);
+        tables = detected_tables;
+        entries = schema_entries;
     }
 
     metadata.push(("Tables Detected".to_string(), tables.len().to_string()));
@@ -609,10 +607,56 @@ fn inspect_sqlite_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &Forens
         total_bytes: bytes.len() as u64,
         sha256,
         metadata,
-        permissions_or_tables: tables.into_iter().collect(),
+        permissions_or_tables: tables,
         entries,
         warnings,
     }
+}
+
+fn scan_sqlite_schema_tables(bytes: &[u8]) -> (bool, Vec<String>, Vec<ForensicEntry>) {
+    let wal_mode = bytes.len() >= 20 && (bytes[18] == 2 || bytes[19] == 2);
+    let mut tables = BTreeSet::new();
+    let mut entries = Vec::new();
+    let lossy = String::from_utf8_lossy(bytes);
+    let upper = lossy.to_ascii_uppercase();
+    for stmt_prefix in ["CREATE TABLE ", "CREATE VIRTUAL TABLE ", "CREATE VIEW "] {
+        let mut idx = 0usize;
+        while let Some(found) = upper[idx..].find(stmt_prefix) {
+            let start = idx + found;
+            let trimmed_after = lossy[start + stmt_prefix.len()..].trim_start();
+            let after = if trimmed_after.len() >= 14 && trimmed_after[..14].eq_ignore_ascii_case("IF NOT EXISTS ") {
+                trimmed_after[14..].trim_start()
+            } else {
+                trimmed_after
+            };
+            let name_end = after
+                .find(|c: char| c.is_whitespace() || c == '(')
+                .unwrap_or(after.len().min(80));
+            let raw_tbl = after[..name_end].trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']');
+            let tbl = raw_tbl
+                .strip_prefix("main.")
+                .or_else(|| raw_tbl.strip_prefix("MAIN."))
+                .unwrap_or(raw_tbl)
+                .trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']');
+            if !tbl.is_empty() && tbl.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                tables.insert(tbl.to_string());
+                let stmt_end = lossy[start..]
+                    .find(')')
+                    .map(|p| (start + p + 1).min(start + 220))
+                    .unwrap_or((start + 120).min(lossy.len()));
+                let snippet = lossy[start..stmt_end].replace(['\r', '\n'], " ");
+                entries.push(ForensicEntry {
+                    category: "SQLite Schema".to_string(),
+                    name: tbl.to_string(),
+                    detail: snippet,
+                    size_bytes: None,
+                });
+            }
+            let after_start = lossy.len() - after.len();
+            idx = (after_start + name_end.max(1)).min(lossy.len());
+        }
+    }
+    (wal_mode, tables.into_iter().collect(), entries)
 }
 
 fn looks_like_xml(bytes: &[u8]) -> bool {
@@ -745,13 +789,24 @@ mod tests {
     fn inspects_unencrypted_ab_backup_and_sqlite_header() {
         let tmp = TempDir::new().unwrap();
 
-        // Build synthetic 512-byte TAR header for apps/com.example.chat/db/msgstore.db
-        let mut tar = vec![0u8; 1536];
+        // Build synthetic SQLite 3 file with CREATE TABLE schema
+        let mut db = vec![0u8; 4096];
+        db[..16].copy_from_slice(b"SQLite format 3\0");
+        db[16..18].copy_from_slice(&4096u16.to_be_bytes());
+        db[18] = 2; // WAL
+        db[19] = 2;
+        db[56..60].copy_from_slice(&1u32.to_be_bytes());
+        let schema = b"CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, body TEXT)";
+        db[120..120 + schema.len()].copy_from_slice(schema);
+
+        // Build synthetic 512-byte TAR header + 4096-byte SQLite payload + 1024-byte trailer
+        let mut tar = vec![0u8; 512 + db.len() + 1024];
         let name = b"apps/com.example.chat/db/msgstore.db";
         tar[..name.len()].copy_from_slice(name);
-        let size_octal = b"00000000100\0";
-        tar[124..124 + size_octal.len()].copy_from_slice(size_octal);
+        let size_octal = format!("{:011o}\0", db.len());
+        tar[124..124 + size_octal.len()].copy_from_slice(size_octal.as_bytes());
         tar[156] = b'0';
+        tar[512..512 + db.len()].copy_from_slice(&db);
 
         let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
         enc.write_all(&tar).unwrap();
@@ -764,17 +819,14 @@ mod tests {
 
         let ab_report = inspect_artifact(&ab_path, &ForensicOptions::default()).unwrap();
         assert_eq!(ab_report.kind, ArtifactKind::AndroidBackupAb);
-        assert!(ab_report.entries.iter().any(|e| e.name.contains("msgstore.db")));
+        assert!(
+            ab_report
+                .entries
+                .iter()
+                .any(|e| e.name.contains("msgstore.db") && e.detail.contains("SQLite 3"))
+        );
+        assert!(ab_report.permissions_or_tables.contains(&"messages".to_string()));
 
-        // Build synthetic SQLite 3 file with CREATE TABLE schema
-        let mut db = vec![0u8; 4096];
-        db[..16].copy_from_slice(b"SQLite format 3\0");
-        db[16..18].copy_from_slice(&4096u16.to_be_bytes());
-        db[18] = 2; // WAL
-        db[19] = 2;
-        db[56..60].copy_from_slice(&1u32.to_be_bytes());
-        let schema = b"CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, body TEXT)";
-        db[120..120 + schema.len()].copy_from_slice(schema);
         let db_path = tmp.path().join("msgstore.db");
         std::fs::write(&db_path, &db).unwrap();
 

@@ -95,17 +95,49 @@ impl AndroidOutputParser {
         }
         self.summary.log_lines_seen += 1;
 
-        for marker in ["INSTALL_FAILED_", "DELETE_FAILED_", "DEVICE_UNAUTHORIZED", "FAILED ("] {
+        for marker in ["INSTALL_FAILED_", "INSTALL_PARSE_FAILED_", "DELETE_FAILED_"] {
             if let Some(pos) = trimmed.find(marker) {
-                let token = trimmed[pos..]
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or(marker)
-                    .trim_matches(|c: char| matches!(c, '[' | ']' | ':' | ','));
-                if !self.detected_status_tokens.iter().any(|t| t == token) {
-                    self.detected_status_tokens.push(token.to_string());
+                let token: String = trimmed[pos..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !token.is_empty() && !self.detected_status_tokens.iter().any(|t| t == &token) {
+                    self.detected_status_tokens.push(token);
                 }
             }
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        let mut push_tok = |tok: &str| {
+            if !self.detected_status_tokens.iter().any(|t| t == tok) {
+                self.detected_status_tokens.push(tok.to_string());
+            }
+        };
+        if lower.contains("device unauthorized") || trimmed.contains("DEVICE_UNAUTHORIZED") {
+            push_tok("DEVICE_UNAUTHORIZED");
+        }
+        if lower.contains("device offline") || trimmed.contains("DEVICE_OFFLINE") {
+            push_tok("DEVICE_OFFLINE");
+        }
+        if lower.contains("no devices/emulators found")
+            || (lower.contains("device '") && lower.contains("' not found"))
+            || trimmed.contains("NO_DEVICES_FOUND")
+        {
+            push_tok("NO_DEVICES_FOUND");
+        }
+        if lower.contains("flashing is not allowed")
+            || lower.contains("device is locked")
+            || lower.contains("bootloader is locked")
+            || trimmed.contains("FASTBOOT_LOCKED")
+        {
+            push_tok("FASTBOOT_LOCKED");
+        }
+        if lower.contains("no such partition")
+            || lower.contains("partition doesn't exist")
+            || lower.contains("partition table doesn't exist")
+            || trimmed.contains("FASTBOOT_PARTITION_NOT_FOUND")
+        {
+            push_tok("FASTBOOT_PARTITION_NOT_FOUND");
         }
 
         if let Some(cap) = RE_PCT.captures(trimmed)
@@ -268,5 +300,24 @@ mod tests {
         assert_eq!(p.summary.devices_seen, 1);
         assert_eq!(p.summary.properties_seen, 1);
         assert_eq!(p.summary.packages_seen, 1);
+    }
+
+    #[test]
+    fn detects_real_adb_and_fastboot_error_tokens() {
+        let mut p = AndroidOutputParser::new();
+        p.feed_line("adb.exe: error: device unauthorized.");
+        p.feed_line("error: no devices/emulators found");
+        p.feed_line("Failure [INSTALL_PARSE_FAILED_NO_CERTIFICATES]");
+        p.feed_line("FAILED (remote: 'Flashing is not allowed in Lock State')");
+
+        assert_eq!(
+            p.detected_status_tokens,
+            vec![
+                "DEVICE_UNAUTHORIZED".to_string(),
+                "NO_DEVICES_FOUND".to_string(),
+                "INSTALL_PARSE_FAILED_NO_CERTIFICATES".to_string(),
+                "FASTBOOT_LOCKED".to_string(),
+            ]
+        );
     }
 }

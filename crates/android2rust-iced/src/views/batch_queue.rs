@@ -63,16 +63,16 @@ pub fn view_batch_queue(app: &App) -> Element<'_, Message> {
 
             let actions = row![
                 button(text("Up").size(11))
-                    .on_press_maybe((idx > 0).then_some(Message::MoveQueueUp(idx)))
+                    .on_press_maybe((can_edit && idx > 0).then_some(Message::MoveQueueUp(idx)))
                     .style(button::secondary),
                 button(text("Dn").size(11))
-                    .on_press_maybe((idx + 1 < len).then_some(Message::MoveQueueDown(idx)))
+                    .on_press_maybe((can_edit && idx + 1 < len).then_some(Message::MoveQueueDown(idx)))
                     .style(button::secondary),
                 button(text("Edit").size(11))
-                    .on_press(Message::LoadQueueItem(idx))
+                    .on_press_maybe(can_edit.then_some(Message::LoadQueueItem(idx)))
                     .style(button::secondary),
                 button(text("Dup").size(11))
-                    .on_press(Message::DuplicateQueueItem(idx))
+                    .on_press_maybe(can_edit.then_some(Message::DuplicateQueueItem(idx)))
                     .style(button::secondary),
                 button(text("Del").size(11))
                     .on_press_maybe(can_edit.then_some(Message::RemoveQueueItem(idx)))

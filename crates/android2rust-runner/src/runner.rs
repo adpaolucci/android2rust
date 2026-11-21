@@ -230,6 +230,12 @@ fn execute_job_internal(
                 // Fastboot writes progress & info to stderr normally
                 let outcome = parser.feed_line(&line);
                 match outcome {
+                    ParsedLineOutcome::Progress(pct) => {
+                        emit(RunnerEvent::Progress {
+                            percent: pct,
+                            current_file: parser.current_item.clone(),
+                        });
+                    }
                     ParsedLineOutcome::Record(rec) => {
                         log_lines.push(line);
                         file_actions.push(rec.clone());
@@ -294,7 +300,19 @@ fn execute_job_internal(
 
     let cancelled = cancel.is_cancelled();
     let exit_code = if cancelled { -1 } else { status.code().unwrap_or(1) };
-    let status_info = if let Some(tok) = parser.detected_status_tokens.first() {
+    let allow_token_override = exit_code != 0
+        || matches!(
+            job.operation,
+            AndroidOperation::InstallApk
+                | AndroidOperation::UninstallPackage
+                | AndroidOperation::Sideload
+                | AndroidOperation::FastbootFlash
+                | AndroidOperation::FastbootErase
+                | AndroidOperation::FastbootFormat
+                | AndroidOperation::FastbootFlashingUnlock
+                | AndroidOperation::FastbootFlashingLock
+        );
+    let status_info = if allow_token_override && let Some(tok) = parser.detected_status_tokens.first() {
         let mut decoded = decode_status_code(tok);
         decoded.exit_code = Some(exit_code);
         decoded

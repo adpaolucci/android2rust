@@ -4,12 +4,12 @@ Part of the **GUAP** Ecosystem (`guap.ca`) • [**Project Hub & Web Documentatio
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/adpaolucci/android2rust/actions/workflows/ci.yml/badge.svg)](https://github.com/adpaolucci/android2rust/actions/workflows/ci.yml)
-
-**Ready-to-submit WinGet & Homebrew manifests live in [`packaging/`](packaging/README.md).**
 [![Rust: 2024](https://img.shields.io/badge/Rust-2024%20(1.88%2B)-orange.svg)](Cargo.toml)
 [![Architecture: 7 Crates](https://img.shields.io/badge/Workspace-7%20Crates-emerald.svg)](Cargo.toml)
 [![GUI: WinSafe Win32 + Iced 0.14](https://img.shields.io/badge/GUI-WinSafe%20Win32%20%2B%20Iced%200.14-cyan.svg)](crates/android2rust-win32)
 [![MCP: stdio JSON-RPC](https://img.shields.io/badge/MCP-stdio%20JSON--RPC%202.0-purple.svg)](crates/android2rust-mcp)
+
+**Ready-to-submit WinGet & Homebrew manifests live in [`packaging/`](packaging/README.md).**
 
 **`android2rust`** is a 100% pure-Rust desktop GUI wrapper, bidirectional ADB/Fastboot command & recipe orchestrator, live device telemetry runner, **offline Android forensics & artifact inspector** (`.apk`, `.ab` backups, SQLite `.db`, `shared_prefs` XML, `logcat`/`getprop`), air-gapped HTML/JSON/Markdown reporter, CLI, and **Model Context Protocol (MCP)** server. It ships **two specialized pure-Rust GUIs** sharing the same core engine:
 1. **`android2rust-win32`** (**WinSafe `0.0.29`**) — Zero-GPU authentic native Win32 Common Controls GUI (ComCtl v6, Per-Monitor DPI v2, Vista+ COM dialogs), engineered for Windows Desktops, elevated Administrator sessions, Hyper-V/VMware VMs, and **Windows Server over RDP**.
@@ -58,7 +58,7 @@ android2rust/
 - **Cross-Platform Iced on Windows**: Run `android2rust-iced.exe` directly or invoke `android2rust gui --iced` to launch the matching Iced UI on Windows (supports `ICED_BACKEND=tiny-skia` for software rendering fallback).
 
 Both GUIs provide full feature parity across:
-- **Designer & Diagnostics**: Job identity, 8 built-in presets (device triage, logcat capture, APK sideload/install, pull extraction, `.ab` backup, fastboot variables, safe boot flash preview, offline forensic audit), bidirectional CLI importer, persistent `%APPDATA%\android2rust\profiles.json`, Windows Task Scheduler (`schtasks /Create`) generator, and real-time validation diagnostics.
+- **Designer & Diagnostics**: Job identity, 8 built-in presets (device triage, props fingerprint, 3rd-party package audit, APK install/grant, logcat crash snapshot, pull evidence, guarded fastboot flash preview, and offline forensic audit), bidirectional CLI importer, persistent `%APPDATA%\android2rust\profiles.json`, Windows Task Scheduler (`schtasks /Create`) generator, and real-time validation diagnostics.
 - **ADB & Packages**: `-s` serial / `-d` USB / `-e` emulator / `-t` transport ID targeting, `devices -l`, `getprop`, `pm list packages` filters (`-3`, `-s`, `-f`, `-i`, `-U`), `install` (`-r`, `-d`, `-g`, `--user`), `uninstall` (`-k`), `disable-user` / `enable`, `shell`, `dumpsys`, `sideload`, and `reboot` targets.
 - **Transfer, Backup & Logcat**: `adb pull` / `adb push` (`-a` preserve timestamps, `-z` compression), `adb backup` / `adb restore` (`-apk`, `-obb`, `-shared`, `-all`, `-system`), `bugreport`, and `logcat` (`-b` buffers, `-d`, `-c`, `-v` format, `-t` max lines, filter specs).
 - **Fastboot & Partitions**: `devices`, `getvar all`, `flash` (slot `--slot`, `--skip-reboot`, `--disable-verity`, `--disable-verification`), `boot`, `erase`, `format`, `flashing unlock/lock`, and `reboot` (`bootloader`, `fastbootd`, `recovery`).

@@ -1,12 +1,14 @@
 use android2rust_core::format::{format_bytes, format_duration};
 use android2rust_core::{
-    AndroidJob, AndroidOperation, ForensicOptions, ProfileStore, RunHistoryEntry, ScheduleSpec, ToolFamily,
-    ValidationSeverity, build_batch_script, build_powershell_script, build_schtasks_command, build_shell_script,
-    builtin_presets, decode_status_code, find_preset, format_command_line, init_logging, inspect_artifact,
-    parse_command_line, parse_recipe, serialize_recipe, validate_job,
+    AndroidJob, AndroidOperation, ProfileStore, RunHistoryEntry, ScheduleSpec, ToolFamily, ValidationSeverity,
+    build_batch_script, build_powershell_script, build_schtasks_command, build_shell_script, builtin_presets,
+    decode_status_code, find_preset, format_command_line, init_logging, parse_command_line, parse_recipe,
+    serialize_recipe, validate_job,
 };
 use android2rust_report::{ReportFormat, parse_log_file_to_run_result, write_report};
-use android2rust_runner::{CancelToken, RunResult, RunnerEvent, detect_environment, spawn_job_runner};
+use android2rust_runner::{
+    CancelToken, RunResult, RunnerEvent, detect_environment, run_job_blocking, spawn_job_runner,
+};
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::{Args, Parser, Subcommand};
@@ -610,10 +612,25 @@ fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Inspect(ins) => {
-            let rep = inspect_artifact(&ins.path, &ForensicOptions::default())?;
+            let job = AndroidJob {
+                name: ins
+                    .path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Artifact Inspection")
+                    .to_string(),
+                tool: ToolFamily::Forensics,
+                operation: AndroidOperation::InspectArtifact,
+                source_path: ins.path.display().to_string(),
+                ..Default::default()
+            };
+            let run_res = run_job_blocking(&job, None, &CancelToken::new())?;
+            let rep = run_res
+                .forensic_report
+                .as_ref()
+                .context("Forensic job completed without a forensic report")?;
             if let Some(out) = &ins.report {
                 let fmt = ReportFormat::parse(&ins.format)?;
-                let run_res = parse_log_file_to_run_result(&ins.path)?;
                 let written = write_report(&run_res, fmt, out)?;
                 if !ins.json {
                     for p in written {
@@ -622,7 +639,7 @@ fn run_cli(cli: Cli) -> Result<i32> {
                 }
             }
             if ins.json {
-                println!("{}", serde_json::to_string_pretty(&rep)?);
+                println!("{}", serde_json::to_string_pretty(rep)?);
             } else {
                 println!("Artifact : {}", rep.path);
                 println!("Format   : {}", rep.kind.label());
@@ -635,6 +652,12 @@ fn run_cli(cli: Cli) -> Result<i32> {
                     println!("Permissions / Tables ({}):", rep.permissions_or_tables.len());
                     for p in &rep.permissions_or_tables {
                         println!("  - {p}");
+                    }
+                }
+                if !rep.warnings.is_empty() {
+                    println!("Warnings ({}):", rep.warnings.len());
+                    for w in &rep.warnings {
+                        println!("  [WARN] {w}");
                     }
                 }
                 if !rep.entries.is_empty() {

@@ -171,12 +171,22 @@ fn atomic_write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(value)?;
-    let tmp_path = path.with_extension("json.tmp");
+    let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("data.json");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = path.with_file_name(format!("{fname}.{}.{}.tmp", std::process::id(), nanos));
     std::fs::write(&tmp_path, json)?;
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
+    if std::fs::rename(&tmp_path, path).is_err() {
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Err(err) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err.into());
+        }
     }
-    std::fs::rename(&tmp_path, path)?;
     Ok(())
 }
 
