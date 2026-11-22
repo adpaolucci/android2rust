@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod html;
 pub mod json;
 pub mod markdown;
@@ -109,13 +111,28 @@ pub fn parse_log_file_to_run_result(path: &Path) -> Result<RunResult> {
         return run_job_blocking(&job, None, &CancelToken::new());
     }
 
-    let bytes = std::fs::read(path).with_context(|| format!("Failed to read log file {}", path.display()))?;
-    if bytes.starts_with(b"ANDROID BACKUP\n")
-        || bytes.starts_with(b"ANDROID BACKUP\r\n")
-        || bytes.starts_with(b"SQLite format 3\0")
-        || bytes.starts_with(b"PK\x03\x04")
-        || bytes.starts_with(b"PK\x05\x06")
-        || (bytes.len() >= 8 && bytes.starts_with(&[0x03, 0x00, 0x08, 0x00]))
+    let mut head_file =
+        std::fs::File::open(path).with_context(|| format!("Failed to open log file {}", path.display()))?;
+    let mut head = [0u8; 64];
+    let mut head_len = 0usize;
+    while head_len < head.len() {
+        match std::io::Read::read(&mut head_file, &mut head[head_len..]) {
+            Ok(0) => break,
+            Ok(n) => head_len += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e).with_context(|| format!("Failed to inspect header of {}", path.display())),
+        }
+    }
+    drop(head_file);
+
+    let sig = &head[..head_len];
+    if sig.starts_with(b"ANDROID BACKUP\n")
+        || sig.starts_with(b"ANDROID BACKUP\r\n")
+        || sig.starts_with(b"SQLite format 3\0")
+        || sig.starts_with(b"PK\x03\x04")
+        || sig.starts_with(b"PK\x05\x06")
+        || sig.starts_with(b"dex\n")
+        || (head_len >= 8 && sig.starts_with(&[0x03, 0x00, 0x08, 0x00]))
     {
         let job = AndroidJob {
             name: path
@@ -131,6 +148,7 @@ pub fn parse_log_file_to_run_result(path: &Path) -> Result<RunResult> {
         return run_job_blocking(&job, None, &CancelToken::new());
     }
 
+    let bytes = std::fs::read(path).with_context(|| format!("Failed to read log file {}", path.display()))?;
     let text = String::from_utf8_lossy(&bytes);
     let mut parser = AndroidOutputParser::new();
     let mut file_actions = Vec::new();
@@ -210,6 +228,8 @@ package:/data/app/base.apk=com.example.chat
         assert_eq!(written.len(), 3);
 
         let html = std::fs::read_to_string(&written[0]).unwrap();
+        assert!(html.contains("Content-Security-Policy"));
+        assert!(html.contains("default-src 'none'"));
         assert!(!html.contains("https://cdn"));
         assert!(!html.contains("<script src="));
         assert!(html.contains("Pixel_7"));

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use android2rust_core::{
     AndroidJob, AndroidOperation, ForensicOptions, ProfileStore, ScheduleCadence, ScheduleSpec, ToolFamily,
     ValidationSeverity, build_args, build_batch_script, build_powershell_script, build_schtasks_command,

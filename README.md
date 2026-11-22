@@ -25,7 +25,7 @@ Zero Electron, zero WebView2, zero Node.js, and zero Java/Python runtime overhea
 | :--- | :--- | :--- | :--- | :--- |
 | **Windows Native & RDP Stability** | **Authentic Win32 (`winsafe`) — zero GPU/OpenGL crash risk over RDP/VMs** | Console only | JVM / Chromium memory bloat | None |
 | **Cross-Platform Parity** | **Unified Iced 0.14 UI on Linux, macOS, and Windows (`tiny-skia` CPU fallback)** | Platform-Tools CLI | Often single-OS | `.bat` vs `.sh` split |
-| **Pure-Rust Offline Forensics** | **Built-in `.apk` / `AndroidManifest.xml`, `.ab` zlib TAR, SQLite `.db`, `shared_prefs` XML inspector** | Requires external tools (`aapt2`, `abe.jar`, `sqlite3`) | None or external binaries | Manual pipelines |
+| **Pure-Rust Offline Forensics** | **Hardened `#![forbid(unsafe_code)]` inspector: `.apk` (Manifest, `APK Sig Block 42` v2/v3/v3.1/SourceStamp, Janus & Zip-Slip/mismatch checks), bounded `.ab` TAR, SQLite header/freelist + `-wal`/`-shm`/`-journal`, `shared_prefs` XML** | Requires external tools (`aapt2`, `abe.jar`, `sqlite3`) | None or external binaries | Manual pipelines |
 | **Bidirectional `.a2r` & CLI Parser** | **Paste any `adb` / `fastboot` command or import `.a2r` recipes back into GUI** | Manual CLI recall | Static button wrappers | None |
 | **Destructive Operation Guards** | **Mandatory Dry-Run pre-flight & explicit guard on `flash` / `erase` / `format` / `unlock` / `uninstall` / `restore`** | Immediate execution | Basic prompts | Manual confirmation |
 | **Live Telemetry & Reports** | **Parsed device/package/prop/logcat records, SHA-256 chain-of-custody, air-gapped HTML/JSON/MD** | Plain text stream | Raw terminal pane | Plain log redirection |
@@ -146,5 +146,15 @@ Compiled binaries are emitted to `target\release\`:
 - `android2rust-mcp.exe` (Standalone `stdio` MCP server)
 
 ## License
+
+## Hostile-Evidence Hardening & Supply Chain
+
+Informed by public forensic-parser vulnerability disclosures (such as Signal's April 2021 analysis of commercial extraction tools), all untrusted parsing in `android2rust` is engineered defensively:
+
+- **`#![forbid(unsafe_code)]` Core & Tooling**: Compiled with `#![forbid(unsafe_code)]` across `core`, `runner`, `report`, `mcp`, `cli`, and `iced` (`unsafe` isolated solely to the Windows Win32 windowing wrapper).
+- **Streaming SHA-256 & Decompression-Bomb Caps**: Hashes arbitrarily large artifacts in `64 KiB` chunks while capping in-memory artifact reads (`256 MiB`), `.ab` zlib inflation (`128 MiB`), and ZIP entry inflation (`32 MiB`).
+- **Tamper & Anomaly Detection**: Flags Zip-Slip (`..`), embedded `NUL` bytes, absolute/drive paths, Unicode BiDi spoofing (`U+202A..202E`, `U+2066..2069`), ZIP Local-vs-Central header mismatches, and Dalvik `dex\n` preambles (`Janus`).
+- **Modern Android DFIR**: Detects `APK Sig Block 42` schemes (`v2`, `v3`, `v3.1`, `SourceStamp-v1`/`v2`), SQLite `freelist_page_count` / `user_version` / `application_id`, and streams companion `-wal`/`-shm`/`-journal` files for frame counts and hashes.
+- **Air-Gapped Report CSP & Binary Mitigations**: Self-contained HTML reports enforce `Content-Security-Policy: default-src 'none'; ...`, Windows `x86_64` MSVC release builds enable Control Flow Guard (`-C control-flow-guard=on`) and CET Shadow Stack (`/CETCOMPAT`), and release archives ship `SBOM-crates.txt`.
 
 Licensed under the [Apache License, Version 2.0](LICENSE) (see also [NOTICE](NOTICE)).

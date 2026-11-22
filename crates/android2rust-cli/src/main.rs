@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use android2rust_core::format::{format_bytes, format_duration};
 use android2rust_core::{
     AndroidJob, AndroidOperation, ProfileStore, RunHistoryEntry, ScheduleSpec, ToolFamily, ValidationSeverity,

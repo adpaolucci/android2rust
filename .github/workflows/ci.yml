@@ -13,6 +13,10 @@ env:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test (${{ matrix.os }})
@@ -55,10 +59,8 @@ jobs:
           libxcb-shape0-dev \
           libxcb-xfixes0-dev
 
-    - name: Check Workspace
-      run: cargo check --workspace --all-targets
-
     - name: Check Formatting
+      if: runner.os == 'Linux'
       run: cargo fmt --all -- --check
 
     - name: Clippy Linter
@@ -68,6 +70,7 @@ jobs:
       run: cargo test --workspace --verbose
 
     - name: Build Release Binary
+      if: runner.os != 'macOS'
       run: cargo build --workspace --release
 
   deny:

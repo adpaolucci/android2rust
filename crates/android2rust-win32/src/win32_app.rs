@@ -509,7 +509,7 @@ impl ForensicsPage {
         let sha256 = chk(&page, "Compute SHA-256 Chain-of-Custody Hash", 20, 42);
         let manifest_perms = chk(&page, "Extract AndroidManifest.xml Permissions from APK/XML", 20, 72);
         let sqlite_tables = chk(&page, "Scan SQLite 3 Header, WAL Flag && CREATE TABLE Schemas", 20, 102);
-        let ab_tar = chk(&page, "Decompress Unencrypted .ab Backup & List TAR Entries", 20, 132);
+        let ab_tar = chk(&page, "Decompress Unencrypted .ab Backup && List TAR Entries", 20, 132);
 
         lbl(&page, "Max Entries:", 20, 172, 90);
         let max_entries = edit(&page, 115, 169, 95, 22, (gui::Horz::None, gui::Vert::None));
