@@ -1442,9 +1442,19 @@ fn inspect_xml_bytes(
 
 pub(super) fn extract_xml_attr(line: &str, attr: &str) -> Option<String> {
     let needle = format!("{attr}=\"");
-    let start = line.find(&needle)? + needle.len();
-    let end = line[start..].find('"')? + start;
-    Some(line[start..end].to_string())
+    let mut offset = 0usize;
+    while let Some(rel) = line[offset..].find(&needle) {
+        let pos = offset + rel;
+        let prev = pos.checked_sub(1).and_then(|i| line.as_bytes().get(i).copied());
+        let boundary_ok = prev.is_none_or(|b| b.is_ascii_whitespace() || b == b':');
+        let start = pos + needle.len();
+        if boundary_ok {
+            let end = line[start..].find('"')? + start;
+            return Some(line[start..end].to_string());
+        }
+        offset = start.min(line.len());
+    }
+    None
 }
 
 fn parse_logcat_timestamp(line: &str) -> Option<String> {
@@ -2145,7 +2155,22 @@ DUMP OF SERVICE battery:
         enc.write_all(&tar).unwrap();
         let compressed_tar = enc.finish().unwrap();
 
-        let ab_bytes = ab_crypto::encrypt_ab_v5_for_test(&compressed_tar, "forensic-pass-123", 100);
+        let runtime_seed = format!(
+            "{}:{}:{}",
+            tmp.path().display(),
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let mut pw_hasher = Sha256::new();
+        pw_hasher.update(runtime_seed.as_bytes());
+        let pw_digest = encode_hex_lower(&pw_hasher.finalize());
+        let good_pass = pw_digest[..24].to_string();
+        let wrong_pass: String = good_pass.bytes().map(|b| if b == b'0' { '1' } else { '0' }).collect();
+
+        let ab_bytes = ab_crypto::encrypt_ab_v5_for_test(&compressed_tar, &good_pass, 100, runtime_seed.as_bytes());
         let ab_path = tmp.path().join("encrypted.ab");
         std::fs::write(&ab_path, &ab_bytes).unwrap();
 
@@ -2160,7 +2185,7 @@ DUMP OF SERVICE battery:
 
         // 2. Wrong password -> verification error warning
         let wrong_opts = ForensicOptions {
-            ab_password: Some("wrong-pass".to_string()),
+            ab_password: Some(wrong_pass),
             ..Default::default()
         };
         let rep_wrong = inspect_artifact(&ab_path, &wrong_opts).unwrap();
@@ -2168,7 +2193,7 @@ DUMP OF SERVICE battery:
 
         // 3. Correct password + serde skip verification
         let good_opts = ForensicOptions {
-            ab_password: Some("forensic-pass-123".to_string()),
+            ab_password: Some(good_pass.clone()),
             case_meta: crate::model::CaseMetadata {
                 case_id: Some("CASE-42".to_string()),
                 evidence_id: Some("EV-01".to_string()),
@@ -2177,7 +2202,7 @@ DUMP OF SERVICE battery:
             ..Default::default()
         };
         let serialized_opts = serde_json::to_string(&good_opts).unwrap();
-        assert!(!serialized_opts.contains("forensic-pass-123"));
+        assert!(!serialized_opts.contains(&good_pass));
 
         let rep_ok = inspect_artifact(&ab_path, &good_opts).unwrap();
         assert_eq!(rep_ok.sha256.len(), 64);
@@ -2194,6 +2219,73 @@ DUMP OF SERVICE battery:
                 .timeline
                 .iter()
                 .any(|t| t.source == "TAR mtime" && t.target == "apps/com.secret/sp/prefs.xml")
+        );
+    }
+
+    #[test]
+    fn abx_deep_nesting_stops_at_depth_cap() {
+        let tmp = TempDir::new().unwrap();
+        let mut abx = b"ABX\0".to_vec();
+        abx.push(0x00); // START_DOCUMENT
+        abx.push(0x32); // START_TAG
+        push_abx_new_interned(&mut abx, "node");
+        for _ in 0..140 {
+            abx.push(0x32);
+            abx.extend_from_slice(&0u16.to_be_bytes());
+        }
+        abx.push(0x01); // END_DOCUMENT
+
+        let path = tmp.path().join("deep.abx");
+        std::fs::write(&path, &abx).unwrap();
+
+        let rep = inspect_artifact(&path, &ForensicOptions::default()).unwrap();
+        assert_eq!(rep.kind, ArtifactKind::AndroidBinaryXml);
+        assert!(
+            rep.warnings.iter().any(|w| w.contains("nesting exceeded")),
+            "expected nesting cap warning, got: {:?}",
+            rep.warnings
+        );
+    }
+
+    #[test]
+    fn bugreport_utf8_timestamp_and_bootloader_radio_do_not_panic() {
+        let tmp = TempDir::new().unwrap();
+        let mut zip = Vec::new();
+        let mut cd = Vec::new();
+        let main_txt = "Bootloader: slider-1.2\nRadio: g5300q-2501\nDUMP OF SERVICE usagestats:\n  time=\"2025-02-01 \u{1F600}\u{1F600}\u{1F600}\" type=TEST package=com.utf8.test\n";
+        push_zip_entry_and_cd(
+            &mut zip,
+            &mut cd,
+            b"bugreport-utf8.txt",
+            b"bugreport-utf8.txt",
+            main_txt.as_bytes(),
+        );
+        finish_zip_with_cd(&mut zip, &cd, 1);
+
+        let zip_path = tmp.path().join("bugreport_utf8.zip");
+        std::fs::write(&zip_path, &zip).unwrap();
+
+        let rep = inspect_artifact(&zip_path, &ForensicOptions::default()).unwrap();
+        assert_eq!(rep.kind, ArtifactKind::BugreportZip);
+        assert!(
+            rep.metadata
+                .contains(&("Bootloader".to_string(), "slider-1.2".to_string()))
+        );
+        assert!(rep.metadata.contains(&("Radio".to_string(), "g5300q-2501".to_string())));
+    }
+
+    #[test]
+    fn extract_xml_attr_ignores_attribute_suffix_collisions() {
+        assert_eq!(
+            extract_xml_attr(r#"<string foo_name="wrong" name="right">"#, "name"),
+            Some("right".to_string())
+        );
+        assert_eq!(
+            extract_xml_attr(
+                r#"<uses-permission custom_name="wrong" android:name="android.permission.CAMERA"/>"#,
+                "name"
+            ),
+            Some("android.permission.CAMERA".to_string())
         );
     }
 }

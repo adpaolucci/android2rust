@@ -8,6 +8,7 @@ use std::path::Path;
 
 const MAX_ABX_INTERNED: usize = 65_535;
 const MAX_ABX_TOKENS: usize = 200_000;
+const MAX_ABX_DEPTH: usize = 128;
 
 struct AbxCursor<'a> {
     buf: &'a [u8],
@@ -158,6 +159,12 @@ pub(super) fn inspect_abx_bytes(
                     ));
                     break;
                 };
+                if tag_stack.len() >= MAX_ABX_DEPTH {
+                    warnings.push(format!(
+                        "ABX element nesting exceeded safety cap ({MAX_ABX_DEPTH} levels); stopping parse safely."
+                    ));
+                    break;
+                }
                 element_count += 1;
                 tag_stack.push(tag.clone());
                 if entries.len() < opts.max_entries {

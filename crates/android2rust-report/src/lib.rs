@@ -131,7 +131,12 @@ pub fn parse_log_file_with_options(path: &Path, opts: ForensicOptions) -> Result
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    if path.is_dir() || matches!(ext.as_str(), "apk" | "ab" | "db" | "sqlite" | "sqlite3" | "xml" | "abx") {
+    if path.is_dir()
+        || matches!(
+            ext.as_str(),
+            "apk" | "zip" | "ab" | "db" | "sqlite" | "sqlite3" | "xml" | "abx"
+        )
+    {
         let job = AndroidJob {
             name: path
                 .file_name()
@@ -162,7 +167,7 @@ pub fn parse_log_file_with_options(path: &Path, opts: ForensicOptions) -> Result
     drop(head_file);
 
     let sig = &head[..head_len];
-    if sig.starts_with(b"ANDROID BACKUP\n")
+    let is_binary_header = sig.starts_with(b"ANDROID BACKUP\n")
         || sig.starts_with(b"ANDROID BACKUP\r\n")
         || sig.starts_with(b"SQLite format 3\0")
         || sig.starts_with(b"PK\x03\x04")
@@ -170,7 +175,11 @@ pub fn parse_log_file_with_options(path: &Path, opts: ForensicOptions) -> Result
         || sig.starts_with(b"dex\n")
         || sig.starts_with(b"ABX\0")
         || (head_len >= 8 && sig.starts_with(&[0x03, 0x00, 0x08, 0x00]))
-    {
+        || !sig
+            .iter()
+            .all(|b| !b.is_ascii_control() || matches!(b, b'\n' | b'\r' | b'\t'));
+
+    if is_binary_header {
         let job = AndroidJob {
             name: path
                 .file_name()
@@ -186,22 +195,40 @@ pub fn parse_log_file_with_options(path: &Path, opts: ForensicOptions) -> Result
         return run_job_blocking(&job, None, &CancelToken::new());
     }
 
-    let bytes = std::fs::read(path).with_context(|| format!("Failed to read log file {}", path.display()))?;
-    let text = String::from_utf8_lossy(&bytes);
+    const MAX_LOG_LINES_IN_MEMORY: usize = 200_000;
+    const MAX_SINGLE_LINE_BYTES: u64 = 1024 * 1024;
+    let file = std::fs::File::open(path).with_context(|| format!("Failed to open log file {}", path.display()))?;
+    let mut reader = std::io::BufReader::new(file);
     let mut parser = AndroidOutputParser::new();
     let mut file_actions = Vec::new();
     let mut errors = Vec::new();
     let mut log_lines = Vec::new();
     let mut hasher = Sha256::new();
     let mut hasher512 = Sha512::new();
+    let mut raw_line = Vec::with_capacity(512);
 
-    for raw in text.lines() {
-        let line = raw.trim_end_matches('\r').to_string();
+    loop {
+        raw_line.clear();
+        let n = std::io::BufRead::read_until(
+            &mut std::io::Read::take(&mut reader, MAX_SINGLE_LINE_BYTES),
+            b'\n',
+            &mut raw_line,
+        )
+        .with_context(|| format!("Failed to read log file {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        while raw_line.last().is_some_and(|&b| b == b'\n' || b == b'\r') {
+            raw_line.pop();
+        }
+        let line = String::from_utf8_lossy(&raw_line).into_owned();
         hasher.update(line.as_bytes());
         hasher.update(b"\n");
         hasher512.update(line.as_bytes());
         hasher512.update(b"\n");
-        log_lines.push(line.clone());
+        if log_lines.len() < MAX_LOG_LINES_IN_MEMORY {
+            log_lines.push(line.clone());
+        }
 
         match parser.feed_line(&line) {
             ParsedLineOutcome::Record(rec) => file_actions.push(rec),

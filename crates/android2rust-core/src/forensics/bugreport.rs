@@ -195,6 +195,8 @@ fn parse_main_bugreport_text(
     let mut dumpstate_ts: Option<String> = None;
     let mut build_id: Option<String> = None;
     let mut fingerprint: Option<String> = None;
+    let mut bootloader: Option<String> = None;
+    let mut radio: Option<String> = None;
     let mut kernel: Option<String> = None;
     let mut uptime: Option<String> = None;
     let mut battery_level: Option<String> = None;
@@ -237,6 +239,18 @@ fn parse_main_bugreport_text(
             && let Some(v) = t.strip_prefix("Build fingerprint:")
         {
             fingerprint = Some(v.trim().trim_matches('\'').to_string());
+            continue;
+        }
+        if bootloader.is_none()
+            && let Some(v) = t.strip_prefix("Bootloader:")
+        {
+            bootloader = Some(v.trim().to_string());
+            continue;
+        }
+        if radio.is_none()
+            && let Some(v) = t.strip_prefix("Radio:")
+        {
+            radio = Some(v.trim().to_string());
             continue;
         }
         if kernel.is_none()
@@ -345,6 +359,12 @@ fn parse_main_bugreport_text(
     if let Some(fp) = fingerprint {
         metadata.push(("Build Fingerprint".to_string(), fp));
     }
+    if let Some(bl) = bootloader {
+        metadata.push(("Bootloader".to_string(), bl));
+    }
+    if let Some(r) = radio {
+        metadata.push(("Radio".to_string(), r));
+    }
     if let Some(k) = kernel {
         metadata.push(("Kernel".to_string(), k));
     }
@@ -395,9 +415,21 @@ fn extract_account_name(snippet: &str) -> String {
 fn normalize_space_ts_to_iso(raw: &str) -> Option<String> {
     // Converts "YYYY-MM-DD HH:MM:SS" (plus optional fractional seconds) into "YYYY-MM-DDTHH:MM:SSZ"
     let s = raw.trim();
-    if s.len() >= 19 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' && s.as_bytes()[10] == b' ' {
-        let date_time = &s[..19];
-        return Some(format!("{}Z", date_time.replacen(' ', "T", 1)));
+    let b = s.as_bytes();
+    if b.len() >= 19
+        && b[0..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+        && b[10] == b' '
+        && b[11..13].iter().all(u8::is_ascii_digit)
+        && b[13] == b':'
+        && b[14..16].iter().all(u8::is_ascii_digit)
+        && b[16] == b':'
+        && b[17..19].iter().all(u8::is_ascii_digit)
+    {
+        return Some(format!("{}Z", s[..19].replacen(' ', "T", 1)));
     }
     None
 }

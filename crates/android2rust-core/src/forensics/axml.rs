@@ -170,7 +170,7 @@ fn parse_binary_axml(bytes: &[u8]) -> ManifestSecurityInfo {
                 let start = hsize.max(8);
                 if start <= chunk.len() {
                     res_ids.clear();
-                    for slot in chunk[start..].as_chunks::<4>().0 {
+                    for slot in chunk[start..].as_chunks::<4>().0.iter().take(MAX_AXML_STRINGS) {
                         res_ids.push(u32::from_le_bytes(*slot));
                     }
                 }

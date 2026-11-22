@@ -243,18 +243,37 @@ pub(super) fn decrypt_ab_payload(
 }
 
 #[cfg(test)]
-pub(super) fn encrypt_ab_v5_for_test(plaintext: &[u8], password: &str, rounds: u32) -> Vec<u8> {
+pub(super) fn encrypt_ab_v5_for_test(plaintext: &[u8], password: &str, rounds: u32, seed: &[u8]) -> Vec<u8> {
     use aes::cipher::BlockModeEncrypt;
+    use sha2::{Digest, Sha512};
     type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 
-    let user_salt = [0x11u8; 64];
-    let checksum_salt = [0x22u8; 64];
-    let user_iv = [0x33u8; 16];
-    let master_iv = [0x44u8; 16];
-    // Include bytes > 0x7f to exercise AOSP sign-extended byte-to-char UTF-8 checksum behavior
-    let mut master_key = [0x55u8; 32];
-    master_key[0] = 0x80;
-    master_key[15] = 0xFE;
+    let derive64 = |label: &[u8]| -> [u8; 64] {
+        let mut h = Sha512::new();
+        h.update(seed);
+        h.update(label);
+        h.finalize().into()
+    };
+
+    let user_salt = derive64(b":user_salt");
+    let checksum_salt = derive64(b":checksum_salt");
+    let iv_digest = derive64(b":ivs");
+    let user_iv: [u8; 16] = iv_digest[0..16].try_into().unwrap();
+    let master_iv: [u8; 16] = iv_digest[16..32].try_into().unwrap();
+
+    // Ensure at least one byte >= 0x80 so AOSP sign-extended byte-to-char UTF-8 checksum behavior is exercised
+    let master_key: [u8; 32] = (0u8..=255)
+        .map(|counter| {
+            let mut h = Sha512::new();
+            h.update(seed);
+            h.update(b":master_key:");
+            h.update([counter]);
+            let digest: [u8; 64] = h.finalize().into();
+            let key: [u8; 32] = digest[..32].try_into().unwrap();
+            key
+        })
+        .find(|k| k.iter().any(|&b| b >= 0x80))
+        .unwrap_or_else(|| derive64(b":master_fallback")[..32].try_into().unwrap());
 
     let user_key = pbkdf2_hmac_array::<Sha1, 32>(password.as_bytes(), &user_salt, rounds);
     let mk_utf8 = encode_aosp_utf8_byte_chars(&master_key);

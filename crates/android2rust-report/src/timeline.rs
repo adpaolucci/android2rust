@@ -4,7 +4,19 @@ use anyhow::Result;
 
 fn normalize_telemetry_ts(ts: &str) -> String {
     let b = ts.as_bytes();
-    if b.len() >= 19 && b[4] == b'-' && b[7] == b'-' && b[10] == b' ' {
+    if b.len() >= 19
+        && b[0..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+        && b[10] == b' '
+        && b[11..13].iter().all(u8::is_ascii_digit)
+        && b[13] == b':'
+        && b[14..16].iter().all(u8::is_ascii_digit)
+        && b[16] == b':'
+        && b[17..19].iter().all(u8::is_ascii_digit)
+    {
         format!("{}Z", ts.replacen(' ', "T", 1))
     } else {
         ts.to_string()
