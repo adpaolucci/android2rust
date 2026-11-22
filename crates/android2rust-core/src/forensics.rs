@@ -1,9 +1,15 @@
+mod ab_crypto;
+mod abx;
+mod axml;
+mod bugreport;
+
 use crate::format::{encode_hex_lower, format_bytes};
 use crate::model::ForensicOptions;
 use anyhow::{Context, Result};
+use chrono::{DateTime, NaiveDate};
 use flate2::read::{DeflateDecoder, ZlibDecoder};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::collections::BTreeSet;
 use std::path::Path;
 use walkdir::WalkDir;
@@ -14,6 +20,8 @@ pub enum ArtifactKind {
     AndroidBackupAb,
     SqliteDatabase,
     XmlManifestOrPrefs,
+    AndroidBinaryXml,
+    BugreportZip,
     LogOrPropertyDump,
     DirectoryExtraction,
     UnknownBinary,
@@ -26,6 +34,8 @@ impl ArtifactKind {
             Self::AndroidBackupAb => "Android Backup (.ab)",
             Self::SqliteDatabase => "SQLite 3 Database",
             Self::XmlManifestOrPrefs => "Android XML (Manifest / SharedPreferences)",
+            Self::AndroidBinaryXml => "Android Binary XML (ABX)",
+            Self::BugreportZip => "Android Bugreport Archive (.zip)",
             Self::LogOrPropertyDump => "Android Logcat / Getprop Text",
             Self::DirectoryExtraction => "Extracted Android Directory Tree",
             Self::UnknownBinary => "Binary Artifact",
@@ -42,31 +52,66 @@ pub struct ForensicEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    pub timestamp: String,
+    pub source: String,
+    pub category: String,
+    pub target: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForensicReport {
     pub path: String,
     pub kind: ArtifactKind,
     pub total_bytes: u64,
     pub sha256: String,
+    #[serde(default)]
+    pub sha512: String,
     pub metadata: Vec<(String, String)>,
     pub permissions_or_tables: Vec<String>,
     pub entries: Vec<ForensicEntry>,
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub timeline: Vec<TimelineEvent>,
 }
 
-/// Hard cap on in-memory artifact buffering (`256 MiB`) while streaming full SHA-256 over the file.
+/// Hard cap on in-memory artifact buffering (`256 MiB`) while streaming full SHA-256 + SHA-512 over the file.
 pub const MAX_ARTIFACT_READ_BYTES: u64 = 256 * 1024 * 1024;
 /// Hard cap on `.ab` zlib payload decompression (`128 MiB`) to defeat decompression bombs.
 pub const MAX_AB_DECOMPRESS_BYTES: usize = 128 * 1024 * 1024;
 /// Hard cap on individual APK/ZIP entry decompression (`32 MiB`) for manifest/signature inspection.
 pub const MAX_ZIP_ENTRY_DECOMPRESS_BYTES: usize = 32 * 1024 * 1024;
 
-fn read_artifact_streaming(path: &Path, compute_sha256: bool) -> Result<(Vec<u8>, u64, String, bool)> {
+pub(super) fn epoch_ms_to_rfc3339(ms: i64) -> Option<String> {
+    if !(1_262_304_000_000..=2_524_608_000_000).contains(&ms) {
+        return None;
+    }
+    DateTime::from_timestamp_millis(ms).map(|dt| dt.to_rfc3339())
+}
+
+pub(super) fn dos_datetime_to_rfc3339(date: u16, time: u16) -> Option<String> {
+    if date == 0 {
+        return None;
+    }
+    let year = 1980 + i32::from((date >> 9) & 0x7f);
+    let month = u32::from((date >> 5) & 0x0f);
+    let day = u32::from(date & 0x1f);
+    let hour = u32::from((time >> 11) & 0x1f);
+    let min = u32::from((time >> 5) & 0x3f);
+    let sec = u32::from((time & 0x1f) * 2).min(59);
+    let dt = NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, min, sec)?;
+    Some(dt.and_utc().to_rfc3339())
+}
+
+fn read_artifact_streaming(path: &Path, compute_hashes: bool) -> Result<(Vec<u8>, u64, String, String, bool)> {
     let mut file = std::fs::File::open(path).with_context(|| format!("Failed to open artifact {}", path.display()))?;
     let cap = usize::try_from(MAX_ARTIFACT_READ_BYTES).unwrap_or(usize::MAX);
     let mut buf = Vec::new();
     let mut total_bytes: u64 = 0;
     let mut truncated = false;
-    let mut hasher = compute_sha256.then(Sha256::new);
+    let mut h256 = compute_hashes.then(Sha256::new);
+    let mut h512 = compute_hashes.then(Sha512::new);
     let mut chunk = [0u8; 65_536];
 
     loop {
@@ -74,7 +119,10 @@ fn read_artifact_streaming(path: &Path, compute_sha256: bool) -> Result<(Vec<u8>
             Ok(0) => break,
             Ok(n) => {
                 total_bytes = total_bytes.saturating_add(n as u64);
-                if let Some(h) = hasher.as_mut() {
+                if let Some(h) = h256.as_mut() {
+                    h.update(&chunk[..n]);
+                }
+                if let Some(h) = h512.as_mut() {
                     h.update(&chunk[..n]);
                 }
                 let remaining = cap.saturating_sub(buf.len());
@@ -93,8 +141,9 @@ fn read_artifact_streaming(path: &Path, compute_sha256: bool) -> Result<(Vec<u8>
         }
     }
 
-    let sha256 = hasher.map(|h| encode_hex_lower(&h.finalize())).unwrap_or_default();
-    Ok((buf, total_bytes, sha256, truncated))
+    let sha256 = h256.map(|h| encode_hex_lower(&h.finalize())).unwrap_or_default();
+    let sha512 = h512.map(|h| encode_hex_lower(&h.finalize())).unwrap_or_default();
+    Ok((buf, total_bytes, sha256, sha512, truncated))
 }
 
 fn read_bounded<R: std::io::Read>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
@@ -139,10 +188,12 @@ fn detect_suspicious_entry_name(name: &str) -> Option<&'static str> {
 
 pub fn inspect_artifact(path: &Path, opts: &ForensicOptions) -> Result<ForensicReport> {
     if path.is_dir() {
-        return inspect_directory(path, opts);
+        let mut rep = inspect_directory(path, opts)?;
+        prepend_case_metadata(&mut rep.metadata, &opts.case_meta);
+        return Ok(rep);
     }
 
-    let (bytes, total_bytes, sha256, truncated) = read_artifact_streaming(path, opts.compute_sha256)?;
+    let (bytes, total_bytes, sha256, sha512, truncated) = read_artifact_streaming(path, opts.compute_sha256)?;
 
     let ext = path
         .extension()
@@ -151,46 +202,76 @@ pub fn inspect_artifact(path: &Path, opts: &ForensicOptions) -> Result<ForensicR
         .to_ascii_lowercase();
 
     let mut report = if bytes.starts_with(b"ANDROID BACKUP\n") || bytes.starts_with(b"ANDROID BACKUP\r\n") {
-        inspect_ab_bytes(path, &bytes, sha256, opts)
+        inspect_ab_bytes(path, &bytes, sha256, sha512, opts)
     } else if bytes.starts_with(b"SQLite format 3\0") {
-        inspect_sqlite_bytes(path, &bytes, sha256, opts)
+        inspect_sqlite_bytes(path, &bytes, sha256, sha512, opts)
     } else if bytes.starts_with(b"PK\x03\x04")
         || bytes.starts_with(b"PK\x05\x06")
         || ((bytes.starts_with(b"dex\n") || matches!(ext.as_str(), "apk" | "zip" | "xapk" | "apks"))
             && parse_zip_central_directory(&bytes).is_some())
     {
-        inspect_apk_zip_bytes(path, &bytes, sha256, opts)
+        inspect_apk_zip_bytes(path, &bytes, sha256, sha512, opts)
+    } else if bytes.starts_with(b"ABX\0") {
+        abx::inspect_abx_bytes(path, &bytes, sha256, sha512, opts)
     } else if ext == "xml" || looks_like_xml(&bytes) {
-        inspect_xml_bytes(path, &bytes, sha256, opts)
+        inspect_xml_bytes(path, &bytes, sha256, sha512, opts)
     } else if bytes
         .iter()
         .take(4096)
         .all(|b| !b.is_ascii_control() || matches!(b, b'\n' | b'\r' | b'\t'))
     {
-        inspect_text_dump_bytes(path, &bytes, sha256, opts)
+        inspect_text_dump_bytes(path, &bytes, sha256, sha512, opts)
     } else {
         ForensicReport {
             path: path.display().to_string(),
             kind: ArtifactKind::UnknownBinary,
             total_bytes,
             sha256,
+            sha512,
             metadata: vec![("Format".to_string(), "Unrecognized binary blob".to_string())],
             permissions_or_tables: Vec::new(),
             entries: Vec::new(),
-            warnings: vec!["Magic bytes did not match APK/ZIP, .ab backup, SQLite 3, XML, or UTF-8 text.".to_string()],
+            warnings: vec![
+                "Magic bytes did not match APK/ZIP, ABX, .ab backup, SQLite 3, XML, or UTF-8 text.".to_string(),
+            ],
+            timeline: Vec::new(),
         }
     };
 
     report.total_bytes = total_bytes;
     if truncated {
         report.warnings.push(format!(
-            "Artifact exceeds {} MiB in-memory inspection cap ({} total bytes); SHA-256 hashes the entire file while structural parsing inspected only the leading prefix.",
+            "Artifact exceeds {} MiB in-memory inspection cap ({} total bytes); SHA-256 and SHA-512 hash the entire file while structural parsing inspected only the leading prefix.",
             MAX_ARTIFACT_READ_BYTES / (1024 * 1024),
             total_bytes
         ));
     }
+    prepend_case_metadata(&mut report.metadata, &opts.case_meta);
+    report.timeline.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
     report.entries.truncate(opts.max_entries.max(1));
     Ok(report)
+}
+
+fn prepend_case_metadata(metadata: &mut Vec<(String, String)>, case_meta: &crate::model::CaseMetadata) {
+    let mut prefix = Vec::new();
+    if let Some(cid) = case_meta.case_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        prefix.push(("Case ID".to_string(), cid.to_string()));
+    }
+    if let Some(eid) = case_meta
+        .evidence_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        prefix.push(("Evidence ID".to_string(), eid.to_string()));
+    }
+    if let Some(ex) = case_meta.examiner.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        prefix.push(("Examiner".to_string(), ex.to_string()));
+    }
+    if !prefix.is_empty() {
+        prefix.append(metadata);
+        *metadata = prefix;
+    }
 }
 
 fn inspect_directory(dir: &Path, opts: &ForensicOptions) -> Result<ForensicReport> {
@@ -246,6 +327,7 @@ fn inspect_directory(dir: &Path, opts: &ForensicOptions) -> Result<ForensicRepor
         kind: ArtifactKind::DirectoryExtraction,
         total_bytes,
         sha256: "directory-tree".to_string(),
+        sha512: "directory-tree".to_string(),
         metadata: vec![
             ("Files Scanned".to_string(), total_files.to_string()),
             ("APK Files".to_string(), apk_count.to_string()),
@@ -256,14 +338,22 @@ fn inspect_directory(dir: &Path, opts: &ForensicOptions) -> Result<ForensicRepor
         permissions_or_tables: Vec::new(),
         entries,
         warnings: Vec::new(),
+        timeline: Vec::new(),
     })
 }
 
-fn inspect_ab_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOptions) -> ForensicReport {
+fn inspect_ab_bytes(
+    path: &Path,
+    bytes: &[u8],
+    sha256: String,
+    sha512: String,
+    opts: &ForensicOptions,
+) -> ForensicReport {
     let mut metadata = Vec::new();
     let mut warnings = Vec::new();
     let mut entries = Vec::new();
     let mut permissions_or_tables = Vec::new();
+    let mut timeline = Vec::new();
 
     // Parse 4-line header: ANDROID BACKUP \n version \n compressed \n encryption \n
     let mut pos = 0usize;
@@ -282,43 +372,69 @@ fn inspect_ab_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOp
     let compressed = lines.get(2).map(|s| s == "1").unwrap_or(false);
     let encryption = lines.get(3).cloned().unwrap_or_else(|| "unknown".to_string());
 
-    metadata.push(("Format Version".to_string(), version));
+    metadata.push(("Format Version".to_string(), version.clone()));
     metadata.push(("Compressed (zlib)".to_string(), compressed.to_string()));
     metadata.push(("Encryption".to_string(), encryption.clone()));
 
-    let payload = &bytes[pos..];
     if !encryption.eq_ignore_ascii_case("none") {
-        warnings.push(format!(
-            "Android backup payload is encrypted ('{encryption}'). Password/AES key decryption is required to inspect inner TAR entries."
-        ));
-    } else if opts.inspect_ab_tar_entries {
-        let tar_bytes_res: Result<(Vec<u8>, bool), std::io::Error> = if compressed {
-            read_bounded(ZlibDecoder::new(payload), MAX_AB_DECOMPRESS_BYTES)
-        } else {
-            let truncated = payload.len() > MAX_AB_DECOMPRESS_BYTES;
-            let take = payload.len().min(MAX_AB_DECOMPRESS_BYTES);
-            Ok((payload[..take].to_vec(), truncated))
-        };
+        match ab_crypto::parse_ab_encryption_header(bytes, pos) {
+            Ok(enc_hdr) => {
+                metadata.push(("PBKDF2 Rounds".to_string(), enc_hdr.rounds.to_string()));
+                metadata.push((
+                    "User Salt".to_string(),
+                    format!(
+                        "{} ({} B)",
+                        encode_hex_lower(&enc_hdr.user_salt[..enc_hdr.user_salt.len().min(8)]),
+                        enc_hdr.user_salt.len()
+                    ),
+                ));
+                metadata.push(("User IV".to_string(), encode_hex_lower(&enc_hdr.user_iv)));
 
-        match tar_bytes_res {
-            Ok((tar_bytes, ab_truncated)) => {
-                metadata.push(("TAR Payload Size".to_string(), format_bytes(tar_bytes.len() as u64)));
-                if ab_truncated {
+                if let Some(pw) = opts.ab_password.as_deref().filter(|p| !p.is_empty()) {
+                    let cap = usize::try_from(MAX_ARTIFACT_READ_BYTES).unwrap_or(usize::MAX);
+                    match ab_crypto::decrypt_ab_payload(&version, &enc_hdr, &bytes[enc_hdr.payload_offset..], pw, cap) {
+                        Ok(plain) => {
+                            metadata.push(("Decryption Status".to_string(), "Verified & Decrypted".to_string()));
+                            if opts.inspect_ab_tar_entries {
+                                process_ab_tar_payload(
+                                    &plain,
+                                    compressed,
+                                    opts,
+                                    &mut metadata,
+                                    &mut warnings,
+                                    &mut entries,
+                                    &mut permissions_or_tables,
+                                    &mut timeline,
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            metadata.push(("Decryption Status".to_string(), "Failed".to_string()));
+                            warnings.push(err);
+                        }
+                    }
+                } else {
                     warnings.push(format!(
-                        ".ab TAR payload exceeded {} MiB decompression limit (possible decompression bomb); inspected truncated prefix.",
-                        MAX_AB_DECOMPRESS_BYTES / (1024 * 1024)
+                        "Android backup payload is encrypted ('{encryption}', {} PBKDF2 rounds). Pass --password or ANDROID2RUST_AB_PASSWORD for lawful inspection.",
+                        enc_hdr.rounds
                     ));
                 }
-                let (tar_entries, nested, tar_warnings) = parse_tar_headers(&tar_bytes, opts);
-                metadata.push(("TAR Entries Discovered".to_string(), tar_entries.len().to_string()));
-                entries = tar_entries;
-                permissions_or_tables = nested;
-                warnings.extend(tar_warnings);
             }
             Err(err) => {
-                warnings.push(format!("Failed to inflate .ab zlib stream: {err}"));
+                warnings.push(format!("Android backup payload is encrypted ('{encryption}'): {err}"));
             }
         }
+    } else if opts.inspect_ab_tar_entries {
+        process_ab_tar_payload(
+            &bytes[pos..],
+            compressed,
+            opts,
+            &mut metadata,
+            &mut warnings,
+            &mut entries,
+            &mut permissions_or_tables,
+            &mut timeline,
+        );
     }
 
     ForensicReport {
@@ -326,18 +442,65 @@ fn inspect_ab_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOp
         kind: ArtifactKind::AndroidBackupAb,
         total_bytes: bytes.len() as u64,
         sha256,
+        sha512,
         metadata,
         permissions_or_tables,
         entries,
         warnings,
+        timeline,
     }
 }
 
-fn parse_tar_headers(data: &[u8], opts: &ForensicOptions) -> (Vec<ForensicEntry>, Vec<String>, Vec<String>) {
+#[allow(clippy::too_many_arguments)]
+fn process_ab_tar_payload(
+    payload: &[u8],
+    compressed: bool,
+    opts: &ForensicOptions,
+    metadata: &mut Vec<(String, String)>,
+    warnings: &mut Vec<String>,
+    entries: &mut Vec<ForensicEntry>,
+    permissions_or_tables: &mut Vec<String>,
+    timeline: &mut Vec<TimelineEvent>,
+) {
+    let tar_bytes_res: Result<(Vec<u8>, bool), std::io::Error> = if compressed {
+        read_bounded(ZlibDecoder::new(payload), MAX_AB_DECOMPRESS_BYTES)
+    } else {
+        let truncated = payload.len() > MAX_AB_DECOMPRESS_BYTES;
+        let take = payload.len().min(MAX_AB_DECOMPRESS_BYTES);
+        Ok((payload[..take].to_vec(), truncated))
+    };
+
+    match tar_bytes_res {
+        Ok((tar_bytes, ab_truncated)) => {
+            metadata.push(("TAR Payload Size".to_string(), format_bytes(tar_bytes.len() as u64)));
+            if ab_truncated {
+                warnings.push(format!(
+                    ".ab TAR payload exceeded {} MiB decompression limit (possible decompression bomb); inspected truncated prefix.",
+                    MAX_AB_DECOMPRESS_BYTES / (1024 * 1024)
+                ));
+            }
+            let (tar_entries, nested, tar_warnings, tar_timeline) = parse_tar_headers(&tar_bytes, opts);
+            metadata.push(("TAR Entries Discovered".to_string(), tar_entries.len().to_string()));
+            *entries = tar_entries;
+            *permissions_or_tables = nested;
+            warnings.extend(tar_warnings);
+            timeline.extend(tar_timeline);
+        }
+        Err(err) => {
+            warnings.push(format!("Failed to inflate .ab zlib stream: {err}"));
+        }
+    }
+}
+
+fn parse_tar_headers(
+    data: &[u8],
+    opts: &ForensicOptions,
+) -> (Vec<ForensicEntry>, Vec<String>, Vec<String>, Vec<TimelineEvent>) {
     const MAX_NESTED_INSPECT_BYTES: u64 = 32 * 1024 * 1024;
     let mut out = Vec::new();
     let mut nested = BTreeSet::new();
     let mut tar_warnings = Vec::new();
+    let mut timeline = Vec::new();
     let mut suspicious_count = 0usize;
     let mut offset = 0usize;
 
@@ -355,6 +518,8 @@ fn parse_tar_headers(data: &[u8], opts: &ForensicOptions) -> (Vec<ForensicEntry>
         };
         let size_str = read_c_string(&header[124..136]);
         let size = u64::from_str_radix(size_str.trim(), 8).unwrap_or(0);
+        let mtime_str = read_c_string(&header[136..148]);
+        let mtime_secs = i64::from_str_radix(mtime_str.trim(), 8).unwrap_or(0);
         let typeflag = header[156];
         let kind = match typeflag {
             b'5' => "TAR Dir",
@@ -412,7 +577,9 @@ fn parse_tar_headers(data: &[u8], opts: &ForensicOptions) -> (Vec<ForensicEntry>
             } else if opts.extract_manifest_permissions
                 && (full_name == "AndroidManifest.xml" || full_name.ends_with("/AndroidManifest.xml"))
             {
-                let perms = scan_android_permissions(file_bytes);
+                let sec = axml::parse_manifest_security(file_bytes);
+                let mut perms = scan_android_permissions(file_bytes);
+                perms.extend(sec.permissions);
                 let count = perms.len();
                 nested.extend(perms);
                 detail = format!("{detail} [{count} permissions]");
@@ -420,6 +587,23 @@ fn parse_tar_headers(data: &[u8], opts: &ForensicOptions) -> (Vec<ForensicEntry>
         }
 
         if !full_name.is_empty() {
+            if mtime_secs > 0
+                && mtime_secs < 4_102_444_800
+                && timeline.len() < opts.max_entries
+                && let Some(dt) = DateTime::from_timestamp(mtime_secs, 0)
+            {
+                timeline.push(TimelineEvent {
+                    timestamp: dt.to_rfc3339(),
+                    source: "TAR mtime".to_string(),
+                    category: if typeflag == b'5' {
+                        "Dir Modified".to_string()
+                    } else {
+                        "File Modified".to_string()
+                    },
+                    target: full_name.clone(),
+                    detail: detail.clone(),
+                });
+            }
             out.push(ForensicEntry {
                 category: kind.to_string(),
                 name: full_name,
@@ -441,7 +625,7 @@ fn parse_tar_headers(data: &[u8], opts: &ForensicOptions) -> (Vec<ForensicEntry>
         ));
     }
 
-    (out, nested.into_iter().collect(), tar_warnings)
+    (out, nested.into_iter().collect(), tar_warnings, timeline)
 }
 
 fn read_c_string(slice: &[u8]) -> String {
@@ -449,10 +633,17 @@ fn read_c_string(slice: &[u8]) -> String {
     String::from_utf8_lossy(&slice[..end]).trim().to_string()
 }
 
-fn inspect_apk_zip_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOptions) -> ForensicReport {
+fn inspect_apk_zip_bytes(
+    path: &Path,
+    bytes: &[u8],
+    sha256: String,
+    sha512: String,
+    opts: &ForensicOptions,
+) -> ForensicReport {
     let mut entries = Vec::new();
     let mut permissions = BTreeSet::new();
     let mut warnings = Vec::new();
+    let mut timeline = Vec::new();
     let mut dex_count = 0usize;
     let mut so_abis = BTreeSet::new();
     let mut has_manifest = false;
@@ -498,10 +689,35 @@ fn inspect_apk_zip_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &Foren
                 mismatch_warnings.push(msg);
             }
         }
+        if ze.name == "AndroidManifest.xml" {
+            has_manifest = true;
+        }
+    }
 
+    if suspicious_count > 5 {
+        warnings.push(format!(
+            "...and additional suspicious ZIP/APK entry paths detected ({suspicious_count} total)."
+        ));
+    }
+    warnings.extend(mismatch_warnings);
+    if mismatch_count > 5 {
+        warnings.push(format!(
+            "...and {} additional ZIP Local-vs-Central header mismatches detected.",
+            mismatch_count - 5
+        ));
+    }
+
+    // Dispatch to dedicated adb bugreport ZIP inspector if applicable
+    if bugreport::is_bugreport_zip(&zip_entries, has_manifest) {
+        return bugreport::inspect_bugreport_zip_bytes(path, bytes, sha256, sha512, &zip_entries, warnings, opts);
+    }
+
+    let mut manifest_meta = Vec::new();
+    let mut timeline_cap = opts.max_entries.min(500);
+
+    for ze in &zip_entries {
         let lower = ze.name.to_ascii_lowercase();
         let cat = if ze.name == "AndroidManifest.xml" {
-            has_manifest = true;
             "Manifest"
         } else if lower.starts_with("classes") && lower.ends_with(".dex") {
             dex_count += 1;
@@ -522,14 +738,31 @@ fn inspect_apk_zip_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &Foren
             "Archive Entry"
         };
 
+        let sz = u64::from(ze.uncompressed_size);
+        let detail = format!("{} (method {})", format_bytes(sz), ze.method);
         if entries.len() < opts.max_entries {
-            let sz = u64::from(ze.uncompressed_size);
             entries.push(ForensicEntry {
                 category: cat.to_string(),
                 name: ze.name.clone(),
-                detail: format!("{} (method {})", format_bytes(sz), ze.method),
+                detail: detail.clone(),
                 size_bytes: Some(sz),
             });
+        }
+        if timeline_cap > 0
+            && matches!(
+                cat,
+                "Manifest" | "DEX Bytecode" | "Native Library" | "Signature" | "Resources"
+            )
+            && let Some(ts) = dos_datetime_to_rfc3339(ze.mod_date, ze.mod_time)
+        {
+            timeline.push(TimelineEvent {
+                timestamp: ts,
+                source: "APK/ZIP DOS".to_string(),
+                category: format!("{cat} Modified"),
+                target: ze.name.clone(),
+                detail,
+            });
+            timeline_cap -= 1;
         }
 
         if opts.extract_manifest_permissions && ze.name == "AndroidManifest.xml" {
@@ -540,6 +773,9 @@ fn inspect_apk_zip_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &Foren
                         MAX_ZIP_ENTRY_DECOMPRESS_BYTES / (1024 * 1024)
                     ));
                 }
+                let sec = axml::parse_manifest_security(&manifest_bytes);
+                axml::append_manifest_security(&sec, &mut manifest_meta, &mut warnings);
+                permissions.extend(sec.permissions);
                 for perm in scan_android_permissions(&manifest_bytes) {
                     permissions.insert(perm);
                 }
@@ -548,19 +784,6 @@ fn inspect_apk_zip_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &Foren
                     .push("Could not decompress AndroidManifest.xml (unsupported or corrupt ZIP entry).".to_string());
             }
         }
-    }
-
-    if suspicious_count > 5 {
-        warnings.push(format!(
-            "...and additional suspicious ZIP/APK entry paths detected ({suspicious_count} total)."
-        ));
-    }
-    warnings.extend(mismatch_warnings);
-    if mismatch_count > 5 {
-        warnings.push(format!(
-            "...and {} additional ZIP Local-vs-Central header mismatches detected.",
-            mismatch_count - 5
-        ));
     }
 
     let mut sig_schemes: Vec<String> = Vec::new();
@@ -595,31 +818,38 @@ fn inspect_apk_zip_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &Foren
         so_abis.into_iter().collect::<Vec<_>>().join(", ")
     };
 
+    let mut metadata = vec![
+        ("ZIP Entries".to_string(), zip_entries.len().to_string()),
+        ("DEX Files".to_string(), dex_count.to_string()),
+        ("Native ABIs".to_string(), abis_str),
+        ("Manifest Present".to_string(), has_manifest.to_string()),
+        ("Signature Schemes".to_string(), sig_summary),
+        ("Permissions Found".to_string(), permissions.len().to_string()),
+    ];
+    metadata.extend(manifest_meta);
+
     ForensicReport {
         path: path.display().to_string(),
         kind: ArtifactKind::ApkPackage,
         total_bytes: bytes.len() as u64,
         sha256,
-        metadata: vec![
-            ("ZIP Entries".to_string(), zip_entries.len().to_string()),
-            ("DEX Files".to_string(), dex_count.to_string()),
-            ("Native ABIs".to_string(), abis_str),
-            ("Manifest Present".to_string(), has_manifest.to_string()),
-            ("Signature Schemes".to_string(), sig_summary),
-            ("Permissions Found".to_string(), permissions.len().to_string()),
-        ],
+        sha512,
+        metadata,
         permissions_or_tables: permissions.into_iter().collect(),
         entries,
         warnings,
+        timeline,
     }
 }
 
-struct ZipEntryMeta {
-    name: String,
-    method: u16,
-    compressed_size: u32,
-    uncompressed_size: u32,
-    local_header_offset: usize,
+pub(super) struct ZipEntryMeta {
+    pub name: String,
+    pub method: u16,
+    pub mod_time: u16,
+    pub mod_date: u16,
+    pub compressed_size: u32,
+    pub uncompressed_size: u32,
+    pub local_header_offset: usize,
 }
 
 fn parse_zip_central_directory(bytes: &[u8]) -> Option<(Vec<ZipEntryMeta>, usize)> {
@@ -646,6 +876,8 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Option<(Vec<ZipEntryMeta>, usize
     let mut out = Vec::with_capacity(total_entries.min(4096));
     while pos + 46 <= bytes.len() && &bytes[pos..pos + 4] == b"PK\x01\x02" {
         let method = u16::from_le_bytes([bytes[pos + 10], bytes[pos + 11]]);
+        let mod_time = u16::from_le_bytes([bytes[pos + 12], bytes[pos + 13]]);
+        let mod_date = u16::from_le_bytes([bytes[pos + 14], bytes[pos + 15]]);
         let compressed_size = u32::from_le_bytes([bytes[pos + 20], bytes[pos + 21], bytes[pos + 22], bytes[pos + 23]]);
         let uncompressed_size =
             u32::from_le_bytes([bytes[pos + 24], bytes[pos + 25], bytes[pos + 26], bytes[pos + 27]]);
@@ -662,6 +894,8 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Option<(Vec<ZipEntryMeta>, usize
         out.push(ZipEntryMeta {
             name,
             method,
+            mod_time,
+            mod_date,
             compressed_size,
             uncompressed_size,
             local_header_offset: local_offset,
@@ -790,6 +1024,8 @@ fn parse_zip_local_headers(bytes: &[u8]) -> Vec<ZipEntryMeta> {
     let mut pos = 0usize;
     while pos + 30 <= bytes.len() && &bytes[pos..pos + 4] == b"PK\x03\x04" {
         let method = u16::from_le_bytes([bytes[pos + 8], bytes[pos + 9]]);
+        let mod_time = u16::from_le_bytes([bytes[pos + 10], bytes[pos + 11]]);
+        let mod_date = u16::from_le_bytes([bytes[pos + 12], bytes[pos + 13]]);
         let compressed_size = u32::from_le_bytes([bytes[pos + 18], bytes[pos + 19], bytes[pos + 20], bytes[pos + 21]]);
         let uncompressed_size =
             u32::from_le_bytes([bytes[pos + 22], bytes[pos + 23], bytes[pos + 24], bytes[pos + 25]]);
@@ -802,6 +1038,8 @@ fn parse_zip_local_headers(bytes: &[u8]) -> Vec<ZipEntryMeta> {
         out.push(ZipEntryMeta {
             name,
             method,
+            mod_time,
+            mod_date,
             compressed_size,
             uncompressed_size,
             local_header_offset: pos,
@@ -818,7 +1056,11 @@ fn parse_zip_local_headers(bytes: &[u8]) -> Vec<ZipEntryMeta> {
     out
 }
 
-fn extract_zip_entry_bytes(archive: &[u8], meta: &ZipEntryMeta) -> Option<(Vec<u8>, bool)> {
+pub(super) fn extract_zip_entry_bytes_with_cap(
+    archive: &[u8],
+    meta: &ZipEntryMeta,
+    max_bytes: usize,
+) -> Option<(Vec<u8>, bool)> {
     let off = meta.local_header_offset;
     let hdr = archive.get(off..off.checked_add(30)?)?;
     if &hdr[0..4] != b"PK\x03\x04" {
@@ -831,13 +1073,17 @@ fn extract_zip_entry_bytes(archive: &[u8], meta: &ZipEntryMeta) -> Option<(Vec<u
     let slice = archive.get(data_start..data_end)?;
     match meta.method {
         0 => {
-            let truncated = slice.len() > MAX_ZIP_ENTRY_DECOMPRESS_BYTES;
-            let take = slice.len().min(MAX_ZIP_ENTRY_DECOMPRESS_BYTES);
+            let truncated = slice.len() > max_bytes;
+            let take = slice.len().min(max_bytes);
             Some((slice[..take].to_vec(), truncated))
         }
-        8 => read_bounded(DeflateDecoder::new(slice), MAX_ZIP_ENTRY_DECOMPRESS_BYTES).ok(),
+        8 => read_bounded(DeflateDecoder::new(slice), max_bytes).ok(),
         _ => None,
     }
+}
+
+fn extract_zip_entry_bytes(archive: &[u8], meta: &ZipEntryMeta) -> Option<(Vec<u8>, bool)> {
+    extract_zip_entry_bytes_with_cap(archive, meta, MAX_ZIP_ENTRY_DECOMPRESS_BYTES)
 }
 
 /// Extracts `android.permission.*` and `uses-permission` strings from binary AXML or plain XML.
@@ -864,7 +1110,7 @@ fn scan_android_permissions(bytes: &[u8]) -> BTreeSet<String> {
     perms
 }
 
-fn collect_permissions_from_str(text: &str, out: &mut BTreeSet<String>) {
+pub(super) fn collect_permissions_from_str(text: &str, out: &mut BTreeSet<String>) {
     for marker in ["android.permission.", "com.android.permission."] {
         let mut idx = 0usize;
         while let Some(found) = text[idx..].find(marker) {
@@ -963,7 +1209,13 @@ fn inspect_sqlite_companion_files(path: &Path, compute_sha256: bool) -> (Vec<For
     (entries, names, wal_found)
 }
 
-fn inspect_sqlite_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOptions) -> ForensicReport {
+fn inspect_sqlite_bytes(
+    path: &Path,
+    bytes: &[u8],
+    sha256: String,
+    sha512: String,
+    opts: &ForensicOptions,
+) -> ForensicReport {
     let mut metadata = Vec::new();
     let mut warnings = Vec::new();
     let mut wal_mode = false;
@@ -1042,10 +1294,12 @@ fn inspect_sqlite_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &Forens
         kind: ArtifactKind::SqliteDatabase,
         total_bytes: bytes.len() as u64,
         sha256,
+        sha512,
         metadata,
         permissions_or_tables: tables,
         entries,
         warnings,
+        timeline: Vec::new(),
     }
 }
 
@@ -1104,13 +1358,31 @@ fn looks_like_xml(bytes: &[u8]) -> bool {
     t.starts_with("<?xml") || t.starts_with("<map") || t.starts_with("<manifest")
 }
 
-fn inspect_xml_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOptions) -> ForensicReport {
+fn inspect_xml_bytes(
+    path: &Path,
+    bytes: &[u8],
+    sha256: String,
+    sha512: String,
+    opts: &ForensicOptions,
+) -> ForensicReport {
     let text = String::from_utf8_lossy(bytes);
     let mut entries = Vec::new();
     let mut permissions = BTreeSet::new();
+    let mut warnings = Vec::new();
+    let mut timeline = Vec::new();
 
     if opts.extract_manifest_permissions {
         permissions = scan_android_permissions(bytes);
+    }
+
+    let mut metadata = vec![("XML Lines".to_string(), text.lines().count().to_string())];
+
+    if (bytes.len() >= 8 && bytes.starts_with(&[0x03, 0x00, 0x08, 0x00])) || text.contains("<manifest") {
+        let sec = axml::parse_manifest_security(bytes);
+        axml::append_manifest_security(&sec, &mut metadata, &mut warnings);
+        if opts.extract_manifest_permissions {
+            permissions.extend(sec.permissions);
+        }
     }
 
     for tag in ["<string ", "<boolean ", "<int ", "<long ", "<float "] {
@@ -1128,6 +1400,19 @@ fn inspect_xml_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicO
                 let after = &rest[end_rel.saturating_add(1).min(rest.len())..];
                 after.split('<').next().unwrap_or("").trim().to_string()
             });
+            if tag == "<long "
+                && timeline.len() < opts.max_entries
+                && let Ok(ms) = val.trim().parse::<i64>()
+                && let Some(ts) = epoch_ms_to_rfc3339(ms)
+            {
+                timeline.push(TimelineEvent {
+                    timestamp: ts,
+                    source: "SharedPrefs".to_string(),
+                    category: "Preference Epoch".to_string(),
+                    target: name.clone(),
+                    detail: val.clone(),
+                });
+            }
             entries.push(ForensicEntry {
                 category: "SharedPrefs".to_string(),
                 name,
@@ -1138,39 +1423,100 @@ fn inspect_xml_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicO
         }
     }
 
+    metadata.push(("Keys Extracted".to_string(), entries.len().to_string()));
+    metadata.push(("Permissions Found".to_string(), permissions.len().to_string()));
+
     ForensicReport {
         path: path.display().to_string(),
         kind: ArtifactKind::XmlManifestOrPrefs,
         total_bytes: bytes.len() as u64,
         sha256,
-        metadata: vec![
-            ("XML Lines".to_string(), text.lines().count().to_string()),
-            ("Keys Extracted".to_string(), entries.len().to_string()),
-            ("Permissions Found".to_string(), permissions.len().to_string()),
-        ],
+        sha512,
+        metadata,
         permissions_or_tables: permissions.into_iter().collect(),
         entries,
-        warnings: Vec::new(),
+        warnings,
+        timeline,
     }
 }
 
-fn extract_xml_attr(line: &str, attr: &str) -> Option<String> {
+pub(super) fn extract_xml_attr(line: &str, attr: &str) -> Option<String> {
     let needle = format!("{attr}=\"");
     let start = line.find(&needle)? + needle.len();
     let end = line[start..].find('"')? + start;
     Some(line[start..end].to_string())
 }
 
-fn inspect_text_dump_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &ForensicOptions) -> ForensicReport {
+fn parse_logcat_timestamp(line: &str) -> Option<String> {
+    let b = line.as_bytes();
+    if b.len() >= 23
+        && b[0..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+        && b[10] == b' '
+        && b[11..13].iter().all(u8::is_ascii_digit)
+        && b[13] == b':'
+        && b[14..16].iter().all(u8::is_ascii_digit)
+        && b[16] == b':'
+        && b[17..19].iter().all(u8::is_ascii_digit)
+        && b[19] == b'.'
+    {
+        return Some(format!("{}Z", line[..19].replacen(' ', "T", 1)));
+    }
+    if b.len() >= 18
+        && b[0..2].iter().all(u8::is_ascii_digit)
+        && b[2] == b'-'
+        && b[3..5].iter().all(u8::is_ascii_digit)
+        && b[5] == b' '
+        && b[6..8].iter().all(u8::is_ascii_digit)
+        && b[8] == b':'
+        && b[9..11].iter().all(u8::is_ascii_digit)
+        && b[11] == b':'
+        && b[12..14].iter().all(u8::is_ascii_digit)
+        && b[14] == b'.'
+    {
+        return Some(line[..18].to_string());
+    }
+    None
+}
+
+fn inspect_text_dump_bytes(
+    path: &Path,
+    bytes: &[u8],
+    sha256: String,
+    sha512: String,
+    opts: &ForensicOptions,
+) -> ForensicReport {
     let text = String::from_utf8_lossy(bytes);
     let mut entries = Vec::new();
+    let mut timeline = Vec::new();
     let mut prop_count = 0usize;
     let mut err_count = 0usize;
 
-    for line in text.lines() {
+    for (line_idx, line) in text.lines().enumerate() {
         let t = line.trim();
         if t.is_empty() {
             continue;
+        }
+        if timeline.len() < opts.max_entries
+            && let Some(ts) = parse_logcat_timestamp(t)
+        {
+            let cat = if t.contains(" F ") || t.contains("FATAL EXCEPTION") {
+                "Logcat Fatal"
+            } else if t.contains(" E ") {
+                "Logcat Error"
+            } else {
+                "Logcat Entry"
+            };
+            timeline.push(TimelineEvent {
+                timestamp: ts,
+                source: "Logcat".to_string(),
+                category: cat.to_string(),
+                target: format!("Line {}", line_idx + 1),
+                detail: t.to_string(),
+            });
         }
         if t.starts_with('[')
             && let Some((k, v)) = t.split_once("]: [")
@@ -1202,6 +1548,7 @@ fn inspect_text_dump_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &For
         kind: ArtifactKind::LogOrPropertyDump,
         total_bytes: bytes.len() as u64,
         sha256,
+        sha512,
         metadata: vec![
             ("Total Lines".to_string(), text.lines().count().to_string()),
             ("System Properties".to_string(), prop_count.to_string()),
@@ -1210,6 +1557,7 @@ fn inspect_text_dump_bytes(path: &Path, bytes: &[u8], sha256: String, opts: &For
         permissions_or_tables: Vec::new(),
         entries,
         warnings: Vec::new(),
+        timeline,
     }
 }
 
@@ -1485,5 +1833,367 @@ mod tests {
         let (full, full_trunc) = read_bounded(ZlibDecoder::new(compressed.as_slice()), 256 * 1024).unwrap();
         assert!(!full_trunc);
         assert_eq!(full.len(), 128 * 1024);
+    }
+
+    fn push_abx_new_interned(buf: &mut Vec<u8>, s: &str) {
+        buf.extend_from_slice(&0xFFFFu16.to_be_bytes());
+        buf.extend_from_slice(&(s.len() as u16).to_be_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+
+    #[test]
+    fn parses_abx_binary_xml_and_extracts_timeline() {
+        let tmp = TempDir::new().unwrap();
+        let mut abx = b"ABX\0".to_vec();
+        abx.push(0x00); // START_DOCUMENT
+        abx.push(0x32); // START_TAG
+        push_abx_new_interned(&mut abx, "packages");
+        abx.push(0x32); // START_TAG
+        push_abx_new_interned(&mut abx, "package");
+        abx.push(0x3F); // ATTRIBUTE | TYPE_STRING_INTERNED
+        push_abx_new_interned(&mut abx, "name");
+        push_abx_new_interned(&mut abx, "com.example.chat");
+        abx.push(0x8F); // ATTRIBUTE | TYPE_LONG
+        push_abx_new_interned(&mut abx, "itTimestamp");
+        abx.extend_from_slice(&1_700_000_000_000i64.to_be_bytes());
+        abx.push(0xCF); // ATTRIBUTE | TYPE_BOOLEAN_TRUE
+        push_abx_new_interned(&mut abx, "system");
+        abx.push(0x33); // END_TAG "package" (interned idx 1)
+        abx.extend_from_slice(&1u16.to_be_bytes());
+        abx.push(0x33); // END_TAG "packages" (interned idx 0)
+        abx.extend_from_slice(&0u16.to_be_bytes());
+        abx.push(0x01); // END_DOCUMENT
+
+        let path = tmp.path().join("packages.abx");
+        std::fs::write(&path, &abx).unwrap();
+
+        let rep = inspect_artifact(&path, &ForensicOptions::default()).unwrap();
+        assert_eq!(rep.kind, ArtifactKind::AndroidBinaryXml);
+        assert!(rep.entries.iter().any(|e| {
+            e.category == "ABX Attribute" && e.name == "packages/package@name" && e.detail == "com.example.chat"
+        }));
+        assert!(
+            rep.entries
+                .iter()
+                .any(|e| e.name == "packages/package@system" && e.detail == "true")
+        );
+        assert!(
+            rep.timeline
+                .iter()
+                .any(|t| t.source == "ABX" && t.target == "packages/package@itTimestamp"),
+            "expected ABX epoch timestamp in timeline: {:?}",
+            rep.timeline
+        );
+    }
+
+    type TestAxmlAttr = (i32, i32, u8, u32);
+    type TestAxmlElement = (u32, Vec<TestAxmlAttr>);
+
+    fn build_test_axml_bytes(strings: &[&str], res_ids: &[u32], elements: &[TestAxmlElement]) -> Vec<u8> {
+        // Build UTF-8 RES_STRING_POOL_TYPE chunk
+        let mut pool_data = Vec::new();
+        let mut offsets = Vec::new();
+        for s in strings {
+            offsets.push(pool_data.len() as u32);
+            let char_len = s.chars().count() as u8;
+            let byte_len = s.len() as u8;
+            pool_data.push(char_len);
+            pool_data.push(byte_len);
+            pool_data.extend_from_slice(s.as_bytes());
+            pool_data.push(0);
+        }
+        while !pool_data.len().is_multiple_of(4) {
+            pool_data.push(0);
+        }
+
+        let header_size = 28u16;
+        let strings_start = u32::from(header_size) + (strings.len() as u32) * 4;
+        let pool_size = strings_start + pool_data.len() as u32;
+        let mut chunks = Vec::new();
+
+        // StringPool chunk
+        chunks.extend_from_slice(&0x0001u16.to_le_bytes());
+        chunks.extend_from_slice(&header_size.to_le_bytes());
+        chunks.extend_from_slice(&pool_size.to_le_bytes());
+        chunks.extend_from_slice(&(strings.len() as u32).to_le_bytes());
+        chunks.extend_from_slice(&0u32.to_le_bytes()); // styleCount
+        chunks.extend_from_slice(&0x0100u32.to_le_bytes()); // UTF8_FLAG
+        chunks.extend_from_slice(&strings_start.to_le_bytes());
+        chunks.extend_from_slice(&0u32.to_le_bytes()); // stylesStart
+        for off in offsets {
+            chunks.extend_from_slice(&off.to_le_bytes());
+        }
+        chunks.extend_from_slice(&pool_data);
+
+        // ResourceMap chunk
+        let rmap_size = 8 + (res_ids.len() as u32) * 4;
+        chunks.extend_from_slice(&0x0180u16.to_le_bytes());
+        chunks.extend_from_slice(&8u16.to_le_bytes());
+        chunks.extend_from_slice(&rmap_size.to_le_bytes());
+        for id in res_ids {
+            chunks.extend_from_slice(&id.to_le_bytes());
+        }
+
+        // StartElement chunks
+        for (elem_idx, attrs) in elements {
+            let elem_size = 16 + 20 + (attrs.len() as u32) * 20;
+            chunks.extend_from_slice(&0x0102u16.to_le_bytes());
+            chunks.extend_from_slice(&16u16.to_le_bytes());
+            chunks.extend_from_slice(&elem_size.to_le_bytes());
+            chunks.extend_from_slice(&1u32.to_le_bytes()); // lineNumber
+            chunks.extend_from_slice(&(-1i32).to_le_bytes()); // comment
+            chunks.extend_from_slice(&(-1i32).to_le_bytes()); // ns
+            chunks.extend_from_slice(&elem_idx.to_le_bytes());
+            chunks.extend_from_slice(&20u16.to_le_bytes()); // attributeStart
+            chunks.extend_from_slice(&20u16.to_le_bytes()); // attributeSize
+            chunks.extend_from_slice(&(attrs.len() as u16).to_le_bytes());
+            chunks.extend_from_slice(&0u16.to_le_bytes());
+            chunks.extend_from_slice(&0u16.to_le_bytes());
+            chunks.extend_from_slice(&0u16.to_le_bytes());
+            for (name_idx, raw_val_idx, data_type, data) in attrs {
+                chunks.extend_from_slice(&(-1i32).to_le_bytes());
+                chunks.extend_from_slice(&name_idx.to_le_bytes());
+                chunks.extend_from_slice(&raw_val_idx.to_le_bytes());
+                chunks.extend_from_slice(&8u16.to_le_bytes());
+                chunks.push(0);
+                chunks.push(*data_type);
+                chunks.extend_from_slice(&data.to_le_bytes());
+            }
+        }
+
+        let mut axml = Vec::new();
+        axml.extend_from_slice(&[0x03, 0x00, 0x08, 0x00]);
+        axml.extend_from_slice(&(8 + chunks.len() as u32).to_le_bytes());
+        axml.extend_from_slice(&chunks);
+        axml
+    }
+
+    #[test]
+    fn parses_binary_axml_manifest_security_and_warnings() {
+        let tmp = TempDir::new().unwrap();
+        let strings = [
+            "name",
+            "debuggable",
+            "minSdkVersion",
+            "versionCode",
+            "versionName",
+            "targetSdkVersion",
+            "allowBackup",
+            "package",
+            "manifest",
+            "uses-sdk",
+            "application",
+            "uses-permission",
+            "com.example.bank",
+            "2.4.1",
+            "android.permission.RECORD_AUDIO",
+        ];
+        let res_ids = [
+            0x0101_0003,
+            0x0101_000f,
+            0x0101_020c,
+            0x0101_021b,
+            0x0101_021c,
+            0x0101_0270,
+            0x0101_0280,
+        ];
+        let axml = build_test_axml_bytes(
+            &strings,
+            &res_ids,
+            &[
+                (8, vec![(7, 12, 0x03, 12), (3, -1, 0x10, 42), (4, 13, 0x03, 13)]),
+                (9, vec![(2, -1, 0x10, 26), (5, -1, 0x10, 35)]),
+                (10, vec![(1, -1, 0x12, 1), (6, -1, 0x12, 1)]),
+                (11, vec![(0, 14, 0x03, 14)]),
+            ],
+        );
+
+        let mut zip = Vec::new();
+        let mut cd = Vec::new();
+        push_zip_entry_and_cd(&mut zip, &mut cd, b"AndroidManifest.xml", b"AndroidManifest.xml", &axml);
+        // Patch non-zero DOS time/date into CD entry to exercise ZIP timeline extraction
+        // 2025-06-15 -> ((2025-1980)<<9)|(6<<5)|15 = 0x5ACF, 12:30:00 -> (12<<11)|(30<<5)|0 = 0x63C0
+        cd[12..14].copy_from_slice(&0x63C0u16.to_le_bytes());
+        cd[14..16].copy_from_slice(&0x5ACFu16.to_le_bytes());
+        finish_zip_with_cd(&mut zip, &cd, 1);
+
+        let apk_path = tmp.path().join("axml_app.apk");
+        std::fs::write(&apk_path, &zip).unwrap();
+
+        let rep = inspect_artifact(&apk_path, &ForensicOptions::default()).unwrap();
+        assert_eq!(rep.kind, ArtifactKind::ApkPackage);
+        assert!(
+            rep.metadata
+                .contains(&("Package Name".to_string(), "com.example.bank".to_string()))
+        );
+        assert!(
+            rep.metadata
+                .contains(&("Version Name".to_string(), "2.4.1".to_string()))
+        );
+        assert!(rep.metadata.contains(&("Version Code".to_string(), "42".to_string())));
+        assert!(rep.metadata.contains(&("Min SDK".to_string(), "26".to_string())));
+        assert!(rep.metadata.contains(&("Target SDK".to_string(), "35".to_string())));
+        assert!(rep.metadata.contains(&("Debuggable".to_string(), "true".to_string())));
+        assert!(rep.metadata.contains(&("Allow Backup".to_string(), "true".to_string())));
+        assert!(
+            rep.permissions_or_tables
+                .contains(&"android.permission.RECORD_AUDIO".to_string())
+        );
+        let joined = rep.warnings.join("\n");
+        assert!(
+            joined.contains("debuggable=\"true\""),
+            "expected debuggable warning: {joined}"
+        );
+        assert!(
+            joined.contains("allowBackup=\"true\""),
+            "expected allowBackup warning: {joined}"
+        );
+        assert!(
+            rep.timeline
+                .iter()
+                .any(|t| t.source == "APK/ZIP DOS" && t.target == "AndroidManifest.xml"),
+            "expected DOS timestamp timeline event"
+        );
+    }
+
+    #[test]
+    fn inspects_adb_bugreport_zip_tombstones_and_usagestats_timeline() {
+        let tmp = TempDir::new().unwrap();
+        let mut zip = Vec::new();
+        let mut cd = Vec::new();
+        let main_txt = "\
+== dumpstate: 2025-02-01 10:15:30
+Build: AP2A.240905.003
+Build fingerprint: 'google/panther/panther:15/AP2A'
+DUMP OF SERVICE package:
+  Package [com.demo.messenger] (12345):
+DUMP OF SERVICE usagestats:
+  time=\"2025-02-01 10:14:00\" type=MOVE_TO_FOREGROUND package=com.demo.messenger
+DUMP OF SERVICE account:
+  Account {name=alice@example.com, type=com.google}
+DUMP OF SERVICE battery:
+  level: 84
+";
+        push_zip_entry_and_cd(&mut zip, &mut cd, b"version.txt", b"version.txt", b"bugreport-v1");
+        push_zip_entry_and_cd(
+            &mut zip,
+            &mut cd,
+            b"main_entry.txt",
+            b"main_entry.txt",
+            b"bugreport-panther.txt",
+        );
+        push_zip_entry_and_cd(
+            &mut zip,
+            &mut cd,
+            b"bugreport-panther.txt",
+            b"bugreport-panther.txt",
+            main_txt.as_bytes(),
+        );
+        push_zip_entry_and_cd(
+            &mut zip,
+            &mut cd,
+            b"FS/data/tombstones/tombstone_00",
+            b"FS/data/tombstones/tombstone_00",
+            b"Build fingerprint: crash",
+        );
+        finish_zip_with_cd(&mut zip, &cd, 4);
+
+        let zip_path = tmp.path().join("bugreport.zip");
+        std::fs::write(&zip_path, &zip).unwrap();
+
+        let rep = inspect_artifact(&zip_path, &ForensicOptions::default()).unwrap();
+        assert_eq!(rep.kind, ArtifactKind::BugreportZip);
+        assert!(
+            rep.metadata
+                .contains(&("Build ID".to_string(), "AP2A.240905.003".to_string()))
+        );
+        assert!(
+            rep.metadata
+                .contains(&("Native Tombstones".to_string(), "1".to_string()))
+        );
+        assert!(
+            rep.metadata
+                .contains(&("Packages Enumerated".to_string(), "1".to_string()))
+        );
+        assert!(
+            rep.metadata
+                .contains(&("Accounts Discovered".to_string(), "1".to_string()))
+        );
+        assert!(rep.metadata.contains(&("Battery Level".to_string(), "84%".to_string())));
+        assert!(rep.permissions_or_tables.contains(&"com.demo.messenger".to_string()));
+        assert!(rep.warnings.iter().any(|w| w.contains("tombstone")));
+        assert!(rep.timeline.iter().any(|t| t.source == "UsageStats"
+            && t.target == "com.demo.messenger"
+            && t.timestamp == "2025-02-01T10:14:00Z"));
+    }
+
+    #[test]
+    fn inspects_and_decrypts_password_protected_ab_backup() {
+        let tmp = TempDir::new().unwrap();
+
+        let xml_payload = b"<map><long name=\"last_sync\" value=\"1700000000000\"/></map>";
+        let mut tar = vec![0u8; 512 + 512 + 1024];
+        let tar_name = b"apps/com.secret/sp/prefs.xml";
+        tar[..tar_name.len()].copy_from_slice(tar_name);
+        let sz_oct = format!("{:011o}\0", xml_payload.len());
+        tar[124..124 + sz_oct.len()].copy_from_slice(sz_oct.as_bytes());
+        tar[136..148].copy_from_slice(b"14500000000\0");
+        tar[156] = b'0';
+        tar[512..512 + xml_payload.len()].copy_from_slice(xml_payload);
+
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&tar).unwrap();
+        let compressed_tar = enc.finish().unwrap();
+
+        let ab_bytes = ab_crypto::encrypt_ab_v5_for_test(&compressed_tar, "forensic-pass-123", 100);
+        let ab_path = tmp.path().join("encrypted.ab");
+        std::fs::write(&ab_path, &ab_bytes).unwrap();
+
+        // 1. No password -> metadata exposes PBKDF2 rounds + warning
+        let rep_locked = inspect_artifact(&ab_path, &ForensicOptions::default()).unwrap();
+        assert!(
+            rep_locked
+                .metadata
+                .contains(&("PBKDF2 Rounds".to_string(), "100".to_string()))
+        );
+        assert!(rep_locked.warnings.iter().any(|w| w.contains("--password")));
+
+        // 2. Wrong password -> verification error warning
+        let wrong_opts = ForensicOptions {
+            ab_password: Some("wrong-pass".to_string()),
+            ..Default::default()
+        };
+        let rep_wrong = inspect_artifact(&ab_path, &wrong_opts).unwrap();
+        assert!(rep_wrong.warnings.iter().any(|w| w.contains("password")));
+
+        // 3. Correct password + serde skip verification
+        let good_opts = ForensicOptions {
+            ab_password: Some("forensic-pass-123".to_string()),
+            case_meta: crate::model::CaseMetadata {
+                case_id: Some("CASE-42".to_string()),
+                evidence_id: Some("EV-01".to_string()),
+                examiner: Some("A. Examiner".to_string()),
+            },
+            ..Default::default()
+        };
+        let serialized_opts = serde_json::to_string(&good_opts).unwrap();
+        assert!(!serialized_opts.contains("forensic-pass-123"));
+
+        let rep_ok = inspect_artifact(&ab_path, &good_opts).unwrap();
+        assert_eq!(rep_ok.sha256.len(), 64);
+        assert_eq!(rep_ok.sha512.len(), 128);
+        assert_eq!(rep_ok.metadata[0], ("Case ID".to_string(), "CASE-42".to_string()));
+        assert!(
+            rep_ok
+                .metadata
+                .contains(&("Decryption Status".to_string(), "Verified & Decrypted".to_string()))
+        );
+        assert!(rep_ok.entries.iter().any(|e| e.name == "apps/com.secret/sp/prefs.xml"));
+        assert!(
+            rep_ok
+                .timeline
+                .iter()
+                .any(|t| t.source == "TAR mtime" && t.target == "apps/com.secret/sp/prefs.xml")
+        );
     }
 }

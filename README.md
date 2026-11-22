@@ -4,14 +4,14 @@ Part of the **GUAP** Ecosystem (`guap.ca`) • [**Project Hub & Web Documentatio
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/adpaolucci/android2rust/actions/workflows/ci.yml/badge.svg)](https://github.com/adpaolucci/android2rust/actions/workflows/ci.yml)
-[![Rust: 2024](https://img.shields.io/badge/Rust-2024%20(1.88%2B)-orange.svg)](Cargo.toml)
+[![Rust: 2024](https://img.shields.io/badge/Rust-2024%20(1.89%2B)-orange.svg)](Cargo.toml)
 [![Architecture: 7 Crates](https://img.shields.io/badge/Workspace-7%20Crates-emerald.svg)](Cargo.toml)
 [![GUI: WinSafe Win32 + Iced 0.14](https://img.shields.io/badge/GUI-WinSafe%20Win32%20%2B%20Iced%200.14-cyan.svg)](crates/android2rust-win32)
 [![MCP: stdio JSON-RPC](https://img.shields.io/badge/MCP-stdio%20JSON--RPC%202.0-purple.svg)](crates/android2rust-mcp)
 
 **Ready-to-submit WinGet & Homebrew manifests live in [`packaging/`](packaging/README.md).**
 
-**`android2rust`** is a 100% pure-Rust desktop GUI wrapper, bidirectional ADB/Fastboot command & recipe orchestrator, live device telemetry runner, **offline Android forensics & artifact inspector** (`.apk`, `.ab` backups, SQLite `.db`, `shared_prefs` XML, `logcat`/`getprop`), air-gapped HTML/JSON/Markdown reporter, CLI, and **Model Context Protocol (MCP)** server. It ships **two specialized pure-Rust GUIs** sharing the same core engine:
+**`android2rust`** is a 100% pure-Rust desktop GUI wrapper, bidirectional ADB/Fastboot command & recipe orchestrator, live device telemetry runner, **offline Android forensics & artifact inspector** (`.apk`, `.ab` backups, Android 12+ `ABX\0`, `adb bugreport` ZIPs, SQLite `.db`, `shared_prefs` XML, `logcat`/`getprop`), air-gapped HTML/JSON/Markdown/Timeline reporter, CLI, and **Model Context Protocol (MCP)** server. It ships **two specialized pure-Rust GUIs** sharing the same core engine:
 1. **`android2rust-win32`** (**WinSafe `0.0.29`**) — Zero-GPU authentic native Win32 Common Controls GUI (ComCtl v6, Per-Monitor DPI v2, Vista+ COM dialogs), engineered for Windows Desktops, elevated Administrator sessions, Hyper-V/VMware VMs, and **Windows Server over RDP**.
 2. **`android2rust-iced`** (**Iced `0.14`**) — Consistent cross-platform retained-mode GUI (`wgpu` + `tiny-skia` CPU fallback) shipping on **Linux**, **macOS**, and **Windows** (`android2rust gui --iced`).
 
@@ -25,10 +25,10 @@ Zero Electron, zero WebView2, zero Node.js, and zero Java/Python runtime overhea
 | :--- | :--- | :--- | :--- | :--- |
 | **Windows Native & RDP Stability** | **Authentic Win32 (`winsafe`) — zero GPU/OpenGL crash risk over RDP/VMs** | Console only | JVM / Chromium memory bloat | None |
 | **Cross-Platform Parity** | **Unified Iced 0.14 UI on Linux, macOS, and Windows (`tiny-skia` CPU fallback)** | Platform-Tools CLI | Often single-OS | `.bat` vs `.sh` split |
-| **Pure-Rust Offline Forensics** | **Hardened `#![forbid(unsafe_code)]` inspector: `.apk` (Manifest, `APK Sig Block 42` v2/v3/v3.1/SourceStamp, Janus & Zip-Slip/mismatch checks), bounded `.ab` TAR, SQLite header/freelist + `-wal`/`-shm`/`-journal`, `shared_prefs` XML** | Requires external tools (`aapt2`, `abe.jar`, `sqlite3`) | None or external binaries | Manual pipelines |
+| **Pure-Rust Offline Forensics** | **Hardened `#![forbid(unsafe_code)]` inspector: `.apk` (AXML security flags, `APK Sig Block 42` v2/v3/v3.1, Janus & Zip-Slip/mismatch checks), Android 12+ `ABX\0`, `bugreport` ZIPs, `.ab` PBKDF2/AES-256-CBC decryption, SQLite freelist + `-wal`/`-shm`/`-journal`, `shared_prefs` XML** | Requires external tools (`aapt2`, `abe.jar`, `sqlite3`, `abx2xml`) | None or external binaries | Manual pipelines |
 | **Bidirectional `.a2r` & CLI Parser** | **Paste any `adb` / `fastboot` command or import `.a2r` recipes back into GUI** | Manual CLI recall | Static button wrappers | None |
 | **Destructive Operation Guards** | **Mandatory Dry-Run pre-flight & explicit guard on `flash` / `erase` / `format` / `unlock` / `uninstall` / `restore`** | Immediate execution | Basic prompts | Manual confirmation |
-| **Live Telemetry & Reports** | **Parsed device/package/prop/logcat records, SHA-256 chain-of-custody, air-gapped HTML/JSON/MD** | Plain text stream | Raw terminal pane | Plain log redirection |
+| **Live Telemetry & Reports** | **Parsed device/package/prop/logcat records, dual SHA-256 + SHA-512 custody, case provenance, air-gapped HTML/JSON/MD + CSV/JSONL timelines** | Plain text stream | Raw terminal pane | Plain log redirection |
 | **AI Agent Integration** | **Native `stdio` MCP Server (`android2rust-mcp`, 10 tools)** | None | None | None |
 
 ---
@@ -93,8 +93,8 @@ android2rust parse workflow.a2r --recipe --json
 android2rust decode INSTALL_FAILED_VERSION_DOWNGRADE
 android2rust decode DEVICE_UNAUTHORIZED
 
-# Perform pure-Rust offline forensic inspection on an APK, .ab backup, SQLite .db, or log dump
-android2rust inspect "C:\Evidence\backup.ab" --report "C:\Evidence\backup_audit.html"
+# Perform pure-Rust offline forensic inspection on an APK, .ab (optionally decrypted), ABX, bugreport ZIP, SQLite .db, or log dump
+android2rust inspect "C:\Evidence\backup.ab" --password "backup_pass" --case-id "IR-2026" --report "C:\Evidence\backup_audit.html" --timeline "C:\Evidence\timeline.csv"
 
 # Run a non-destructive Dry-Run pre-flight simulation
 android2rust dry-run --preset fastboot-flash-image --source "C:\Images\boot.img" --target boot
@@ -102,8 +102,8 @@ android2rust dry-run --preset fastboot-flash-image --source "C:\Images\boot.img"
 # Execute a destructive operation (requires explicit --yes)
 android2rust run --preset fastboot-flash-image --source "C:\Images\boot.img" --target boot --yes --report flash_audit.html
 
-# Convert an existing log file or artifact into HTML, JSON, and Markdown reports
-android2rust report --log-file logcat.txt --output ./audit_bundle --format all
+# Convert an existing log file or artifact into HTML, JSON, Markdown, or timeline reports
+android2rust report --log-file logcat.txt --output ./audit_bundle --format all --timeline events.jsonl
 
 # Start the stdio MCP server
 android2rust mcp
@@ -121,16 +121,16 @@ Add `mcp.json` to your MCP-compatible client (`command: "android2rust"`, `args: 
 4. `android2rust_parse_command` — Command-line / `.a2r` parser + validation diagnostics
 5. `android2rust_decode_status` — Android/ADB/Fastboot status & exit-code decoder
 6. `android2rust_profiles` — Persistent profile CRUD (`list`, `get`, `save`, `delete`)
-7. `android2rust_inspect_artifact` — Pure-Rust offline `.apk` / `.ab` / `.db` / XML / log forensic inspector
+7. `android2rust_inspect_artifact` — Pure-Rust offline `.apk` / `.ab` / `ABX` / `bugreport.zip` / `.db` / XML / log forensic inspector (with `ab_password`, `case_id`, `evidence_id`, `examiner`)
 8. `android2rust_dry_run` — Safe non-destructive pre-flight simulation
 9. `android2rust_run` — Live execution with strict `confirm_destructive: true` refusal guard for destructive ADB/Fastboot operations
-10. `android2rust_report` — Offline HTML / JSON / Markdown audit generator
+10. `android2rust_report` — Offline HTML / JSON / Markdown / Timeline CSV & JSONL audit generator
 
 ---
 
 ## Building from Source
 
-Requires Rust `1.88+` (2024 edition).
+Requires Rust `1.89+` (2024 edition).
 
 ```powershell
 git clone https://github.com/adpaolucci/android2rust.git
@@ -145,16 +145,16 @@ Compiled binaries are emitted to `target\release\`:
 - `android2rust-iced.exe` (Cross-platform Iced 0.14 Desktop Console)
 - `android2rust-mcp.exe` (Standalone `stdio` MCP server)
 
-## License
-
 ## Hostile-Evidence Hardening & Supply Chain
 
 Informed by public forensic-parser vulnerability disclosures (such as Signal's April 2021 analysis of commercial extraction tools), all untrusted parsing in `android2rust` is engineered defensively:
 
 - **`#![forbid(unsafe_code)]` Core & Tooling**: Compiled with `#![forbid(unsafe_code)]` across `core`, `runner`, `report`, `mcp`, `cli`, and `iced` (`unsafe` isolated solely to the Windows Win32 windowing wrapper).
-- **Streaming SHA-256 & Decompression-Bomb Caps**: Hashes arbitrarily large artifacts in `64 KiB` chunks while capping in-memory artifact reads (`256 MiB`), `.ab` zlib inflation (`128 MiB`), and ZIP entry inflation (`32 MiB`).
+- **Streaming Dual Digests & Decompression-Bomb Caps**: Hashes arbitrarily large artifacts in `64 KiB` chunks for dual **SHA-256 + SHA-512** custody while capping in-memory artifact reads (`256 MiB`), `.ab` zlib inflation (`128 MiB`), `bugreport` text (`64 MiB`), and ZIP entry inflation (`32 MiB`).
 - **Tamper & Anomaly Detection**: Flags Zip-Slip (`..`), embedded `NUL` bytes, absolute/drive paths, Unicode BiDi spoofing (`U+202A..202E`, `U+2066..2069`), ZIP Local-vs-Central header mismatches, and Dalvik `dex\n` preambles (`Janus`).
-- **Modern Android DFIR**: Detects `APK Sig Block 42` schemes (`v2`, `v3`, `v3.1`, `SourceStamp-v1`/`v2`), SQLite `freelist_page_count` / `user_version` / `application_id`, and streams companion `-wal`/`-shm`/`-journal` files for frame counts and hashes.
-- **Air-Gapped Report CSP & Binary Mitigations**: Self-contained HTML reports enforce `Content-Security-Policy: default-src 'none'; ...`, Windows `x86_64` MSVC release builds enable Control Flow Guard (`-C control-flow-guard=on`) and CET Shadow Stack (`/CETCOMPAT`), and release archives ship `SBOM-crates.txt`.
+- **Modern Android DFIR**: Parses Android 12+ `ABX\0` binary XML, structured AXML manifest security flags (`debuggable`, `allowBackup`, `usesCleartextTraffic`), `adb bugreport` ZIPs (`dumpstate`, `usagestats`, `package`, `account`, tombstones/ANRs), `APK Sig Block 42` schemes (`v2`, `v3`, `v3.1`, `SourceStamp-v1`/`v2`), lawful `.ab` PBKDF2-HMAC-SHA1 / AES-256-CBC decryption (`ab_password` skipped from serialization), SQLite `freelist_page_count` / `user_version` / `application_id` + companion `-wal`/`-shm`/`-journal` streams, case provenance (`--case-id`, `--evidence-id`, `--examiner`), and chronological CSV/JSONL timelines (`--timeline`).
+- **Air-Gapped Report CSP & Binary Mitigations**: Self-contained HTML reports enforce `Content-Security-Policy: default-src 'none'; ...`, Windows `x86_64` MSVC release builds combine `/STACK:16777216`, Control Flow Guard (`-C control-flow-guard=on`), and CET Shadow Stack (`/CETCOMPAT`), and release archives ship `SBOM-crates.txt`.
+
+## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE) (see also [NOTICE](NOTICE)).

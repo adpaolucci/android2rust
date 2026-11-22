@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 
 use android2rust_core::{
-    AndroidJob, AndroidOperation, ForensicOptions, ProfileStore, ScheduleCadence, ScheduleSpec, ToolFamily,
-    ValidationSeverity, build_args, build_batch_script, build_powershell_script, build_schtasks_command,
+    AndroidJob, AndroidOperation, CaseMetadata, ForensicOptions, ProfileStore, ScheduleCadence, ScheduleSpec,
+    ToolFamily, ValidationSeverity, build_args, build_batch_script, build_powershell_script, build_schtasks_command,
     build_shell_script, builtin_presets, decode_status_code, find_preset, format_command_line, inspect_artifact,
     parse_command_line, parse_recipe, serialize_recipe, validate_job,
 };
-use android2rust_report::{ReportFormat, parse_log_file_to_run_result, write_report};
+use android2rust_report::{ReportFormat, parse_log_file_with_options, write_report, write_timeline};
 use android2rust_runner::{CancelToken, detect_environment, run_job_blocking};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
@@ -95,12 +95,16 @@ pub fn get_tools_manifest() -> Value {
         },
         {
             "name": "android2rust_inspect_artifact",
-            "description": "Run pure-Rust offline forensic inspection on a local .apk, .ab backup, SQLite .db, XML, directory, or log dump.",
+            "description": "Run pure-Rust offline forensic inspection on a local .apk, .ab (optionally decrypted), SQLite .db, ABX, bugreport .zip, XML, directory, or log dump.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Local path to artifact or extracted Android directory" },
-                    "max_entries": { "type": "integer", "description": "Maximum entries to emit (default 2000)" }
+                    "max_entries": { "type": "integer", "description": "Maximum entries to emit (default 2000)" },
+                    "ab_password": { "type": "string", "description": "Optional passphrase to lawfully decrypt encrypted .ab backup payloads" },
+                    "case_id": { "type": "string", "description": "Optional case identifier for chain-of-custody metadata" },
+                    "evidence_id": { "type": "string", "description": "Optional evidence/exhibit identifier" },
+                    "examiner": { "type": "string", "description": "Optional examiner name" }
                 },
                 "required": ["path"]
             }
@@ -142,13 +146,18 @@ pub fn get_tools_manifest() -> Value {
         },
         {
             "name": "android2rust_report",
-            "description": "Generate an air-gapped offline HTML, JSON, or Markdown audit report from an artifact, log file, or dry-run job.",
+            "description": "Generate an air-gapped offline HTML, JSON, Markdown, or timeline audit report from an artifact, log file, or dry-run job.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "log_path": { "type": "string", "description": "Path to existing log file or Android artifact (.apk/.ab/.db/.xml)" },
+                    "log_path": { "type": "string", "description": "Path to existing log file or Android artifact (.apk/.ab/.db/ABX/bugreport .zip/.xml)" },
                     "output": { "type": "string", "description": "Output file path or directory when format is 'all'" },
-                    "format": { "type": "string", "description": "html, json, markdown, or all" },
+                    "format": { "type": "string", "description": "html, json, markdown, timeline-csv, timeline-jsonl, or all" },
+                    "timeline_output": { "type": "string", "description": "Optional secondary output file for chronological CSV or JSONL timeline export" },
+                    "ab_password": { "type": "string", "description": "Optional passphrase for encrypted .ab backups" },
+                    "case_id": { "type": "string", "description": "Optional case identifier for chain-of-custody header" },
+                    "evidence_id": { "type": "string", "description": "Optional evidence identifier" },
+                    "examiner": { "type": "string", "description": "Optional examiner name" },
                     "job": { "type": "object", "description": "Optional job to dry-run if log_path is omitted" },
                     "source": { "type": "string" },
                     "target": { "type": "string" }
@@ -342,10 +351,7 @@ pub fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
         }
         "android2rust_inspect_artifact" => {
             let path_str = args["path"].as_str().ok_or("Missing required string 'path'")?;
-            let mut opts = ForensicOptions::default();
-            if let Some(m) = args["max_entries"].as_u64() {
-                opts.max_entries = m as usize;
-            }
+            let opts = forensic_opts_from_args(args);
             let report = inspect_artifact(Path::new(path_str), &opts).map_err(|e| e.to_string())?;
             serde_json::to_value(report).map_err(|e| e.to_string())
         }
@@ -390,11 +396,18 @@ pub fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let out_str = args["output"].as_str().ok_or("Missing required string 'output'")?;
             let fmt_str = args["format"].as_str().unwrap_or("html");
             let format = ReportFormat::parse(fmt_str).map_err(|e| e.to_string())?;
+            let opts = forensic_opts_from_args(args);
 
             let result = if let Some(log_path) = args["log_path"].as_str() {
-                parse_log_file_to_run_result(Path::new(log_path)).map_err(|e| e.to_string())?
+                parse_log_file_with_options(Path::new(log_path), opts).map_err(|e| e.to_string())?
             } else {
                 let mut job = resolve_job_from_args(args)?;
+                if !opts.case_meta.is_empty() {
+                    job.forensic_opts.case_meta = opts.case_meta;
+                }
+                if opts.ab_password.is_some() {
+                    job.forensic_opts.ab_password = opts.ab_password;
+                }
                 if job.operation != AndroidOperation::InspectArtifact {
                     job = job.with_dry_run();
                 }
@@ -402,15 +415,41 @@ pub fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             };
 
             let written = write_report(&result, format, Path::new(out_str)).map_err(|e| e.to_string())?;
+            let timeline_written =
+                if let Some(tl_str) = args["timeline_output"].as_str().filter(|s| !s.trim().is_empty()) {
+                    Some(write_timeline(&result, Path::new(tl_str)).map_err(|e| e.to_string())?)
+                } else {
+                    None
+                };
             Ok(json!({
                 "status": "success",
                 "files_written": written,
+                "timeline_written": timeline_written,
                 "exit_code": result.exit_code,
                 "log_sha256": result.log_sha256,
+                "log_sha512": result.log_sha512,
             }))
         }
         other => Err(format!("Unknown android2rust MCP tool: {other}")),
     }
+}
+
+fn forensic_opts_from_args(args: &Value) -> ForensicOptions {
+    let mut opts = ForensicOptions::default();
+    if let Some(m) = args["max_entries"].as_u64() {
+        opts.max_entries = m as usize;
+    }
+    opts.case_meta = CaseMetadata {
+        case_id: args["case_id"].as_str().map(str::to_string),
+        evidence_id: args["evidence_id"].as_str().map(str::to_string),
+        examiner: args["examiner"].as_str().map(str::to_string),
+    };
+    opts.ab_password = args["ab_password"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("ANDROID2RUST_AB_PASSWORD").ok().filter(|s| !s.is_empty()));
+    opts
 }
 
 pub fn handle_jsonrpc_request(req: &Value) -> Option<Value> {
@@ -591,6 +630,7 @@ mod tests {
         assert_eq!(inspect_resp["result"]["isError"], false);
 
         let out_html = tmp.path().join("audit.html");
+        let out_tl = tmp.path().join("timeline.csv");
         let rep_resp = handle_jsonrpc_request(&json!({
             "jsonrpc": "2.0",
             "id": 5,
@@ -600,13 +640,22 @@ mod tests {
                 "arguments": {
                     "log_path": xml.display().to_string(),
                     "output": out_html.display().to_string(),
-                    "format": "html"
+                    "format": "html",
+                    "timeline_output": out_tl.display().to_string(),
+                    "case_id": "CASE-MCP-1",
+                    "evidence_id": "EV-99",
+                    "examiner": "MCP-Audit"
                 }
             }
         }))
         .unwrap();
         assert_eq!(rep_resp["result"]["isError"], false);
         assert!(out_html.is_file());
+        assert!(out_tl.is_file());
+        let html = std::fs::read_to_string(&out_html).unwrap();
+        assert!(html.contains("CASE-MCP-1"));
+        let text = rep_resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("log_sha512"));
     }
 
     #[test]

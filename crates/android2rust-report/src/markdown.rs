@@ -21,6 +21,33 @@ pub fn render_markdown(result: &RunResult) -> String {
     };
 
     out.push_str(&format!("# Android2Rust Audit Report: {}\n\n", result.job_name));
+    if let Some(cid) = result
+        .case_meta
+        .case_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str(&format!("- **Case ID**: `{cid}`\n"));
+    }
+    if let Some(eid) = result
+        .case_meta
+        .evidence_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str(&format!("- **Evidence ID**: `{eid}`\n"));
+    }
+    if let Some(ex) = result
+        .case_meta
+        .examiner
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str(&format!("- **Examiner**: `{ex}`\n"));
+    }
     out.push_str(&format!(
         "- **Status**: {status} (`{}`)\n",
         result.status_info.short_label
@@ -43,9 +70,16 @@ pub fn render_markdown(result: &RunResult) -> String {
         format_duration(result.duration_secs)
     ));
     out.push_str(&format!(
-        "- **Log / Chain-of-Custody SHA-256**: `{}`\n\n",
+        "- **Log / Chain-of-Custody SHA-256**: `{}`\n",
         result.log_sha256
     ));
+    if !result.log_sha512.is_empty() {
+        out.push_str(&format!(
+            "- **Log / Chain-of-Custody SHA-512**: `{}`\n",
+            result.log_sha512
+        ));
+    }
+    out.push('\n');
 
     out.push_str("## Command Line\n\n```bash\n");
     out.push_str(&result.command_line);
@@ -79,6 +113,12 @@ pub fn render_markdown(result: &RunResult) -> String {
         out.push_str("## Offline Forensic Analysis\n\n");
         out.push_str(&format!("- **Detected Format**: {}\n", forensic.kind.label()));
         out.push_str(&format!("- **Artifact SHA-256**: `{}`\n", forensic.sha256));
+        if !forensic.sha512.is_empty() {
+            out.push_str(&format!("- **Artifact SHA-512**: `{}`\n", forensic.sha512));
+        }
+        if !forensic.timeline.is_empty() {
+            out.push_str(&format!("- **Timeline Events**: `{}`\n", forensic.timeline.len()));
+        }
         for (k, v) in &forensic.metadata {
             out.push_str(&format!("- **{k}**: `{v}`\n"));
         }

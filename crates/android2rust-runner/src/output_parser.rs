@@ -71,8 +71,9 @@ pub enum ParsedLineOutcome {
 }
 
 static RE_PCT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\s*(\d{1,3})%\]").unwrap());
-static RE_LOGCAT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+\d+\s+\d+\s+([VDIWEFA])\s+(.*)$").unwrap());
+static RE_LOGCAT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^((?:\d{4}-)?\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+\d+\s+\d+\s+([VDIWEFA])\s+(.*)$").unwrap()
+});
 static RE_PULL_SUMMARY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(\d+)\s+files?\s+(?:pulled|pushed).*?\((\d+)\s+bytes").unwrap());
 

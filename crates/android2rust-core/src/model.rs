@@ -329,6 +329,24 @@ impl Default for FastbootOptions {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CaseMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub examiner: Option<String>,
+}
+
+impl CaseMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.case_id.as_deref().is_none_or(|s| s.trim().is_empty())
+            && self.evidence_id.as_deref().is_none_or(|s| s.trim().is_empty())
+            && self.examiner.as_deref().is_none_or(|s| s.trim().is_empty())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForensicOptions {
     pub compute_sha256: bool,
@@ -336,6 +354,10 @@ pub struct ForensicOptions {
     pub inspect_sqlite_tables: bool,
     pub inspect_ab_tar_entries: bool,
     pub max_entries: usize,
+    #[serde(default)]
+    pub case_meta: CaseMetadata,
+    #[serde(skip)]
+    pub ab_password: Option<String>,
 }
 
 impl Default for ForensicOptions {
@@ -346,6 +368,8 @@ impl Default for ForensicOptions {
             inspect_sqlite_tables: true,
             inspect_ab_tar_entries: true,
             max_entries: 2000,
+            case_meta: CaseMetadata::default(),
+            ab_password: None,
         }
     }
 }

@@ -3,13 +3,14 @@
 pub mod html;
 pub mod json;
 pub mod markdown;
+pub mod timeline;
 
-use android2rust_core::{AndroidJob, AndroidOperation, ToolFamily, decode_exit_code};
+use android2rust_core::{AndroidJob, AndroidOperation, ForensicOptions, ToolFamily, decode_exit_code};
 use android2rust_runner::{AndroidOutputParser, CancelToken, ParsedLineOutcome, RunResult, run_job_blocking};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +18,8 @@ pub enum ReportFormat {
     Html,
     Json,
     Markdown,
+    TimelineCsv,
+    TimelineJsonl,
     All,
 }
 
@@ -26,8 +29,12 @@ impl ReportFormat {
             "html" | "htm" => Ok(Self::Html),
             "json" => Ok(Self::Json),
             "md" | "markdown" => Ok(Self::Markdown),
+            "csv" | "timeline-csv" => Ok(Self::TimelineCsv),
+            "jsonl" | "ndjson" | "timeline-jsonl" => Ok(Self::TimelineJsonl),
             "all" | "bundle" => Ok(Self::All),
-            other => anyhow::bail!("Unsupported report format '{other}'. Use html, json, markdown, or all."),
+            other => anyhow::bail!(
+                "Unsupported report format '{other}'. Use html, json, markdown, timeline-csv, timeline-jsonl, or all."
+            ),
         }
     }
 }
@@ -48,6 +55,16 @@ pub fn write_report(result: &RunResult, format: ReportFormat, output: &Path) -> 
         ReportFormat::Markdown => {
             ensure_parent(output)?;
             std::fs::write(output, markdown::render_markdown(result))?;
+            written.push(output.to_path_buf());
+        }
+        ReportFormat::TimelineCsv => {
+            ensure_parent(output)?;
+            std::fs::write(output, timeline::render_timeline_csv(result))?;
+            written.push(output.to_path_buf());
+        }
+        ReportFormat::TimelineJsonl => {
+            ensure_parent(output)?;
+            std::fs::write(output, timeline::render_timeline_jsonl(result)?)?;
             written.push(output.to_path_buf());
         }
         ReportFormat::All => {
@@ -78,6 +95,20 @@ pub fn write_report(result: &RunResult, format: ReportFormat, output: &Path) -> 
     Ok(written)
 }
 
+pub fn write_timeline(result: &RunResult, output: &Path) -> Result<PathBuf> {
+    let is_jsonl = output
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "jsonl" | "ndjson"));
+    let fmt = if is_jsonl {
+        ReportFormat::TimelineJsonl
+    } else {
+        ReportFormat::TimelineCsv
+    };
+    let mut written = write_report(result, fmt, output)?;
+    Ok(written.pop().unwrap_or_else(|| output.to_path_buf()))
+}
+
 fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -87,16 +118,20 @@ fn ensure_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Imports an existing ADB/Fastboot text log OR a binary Android artifact (`.apk`, `.ab`, `.db`, `.xml`, dir)
-/// into a structured [`RunResult`] ready for HTML/JSON/Markdown report export.
+/// Imports an existing ADB/Fastboot text log OR a binary Android artifact (`.apk`, `.ab`, `.db`, `ABX`, `.xml`, dir)
+/// into a structured [`RunResult`] ready for HTML/JSON/Markdown/Timeline report export.
 pub fn parse_log_file_to_run_result(path: &Path) -> Result<RunResult> {
+    parse_log_file_with_options(path, ForensicOptions::default())
+}
+
+pub fn parse_log_file_with_options(path: &Path, opts: ForensicOptions) -> Result<RunResult> {
     let ext = path
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    if path.is_dir() || matches!(ext.as_str(), "apk" | "ab" | "db" | "sqlite" | "sqlite3" | "xml") {
+    if path.is_dir() || matches!(ext.as_str(), "apk" | "ab" | "db" | "sqlite" | "sqlite3" | "xml" | "abx") {
         let job = AndroidJob {
             name: path
                 .file_name()
@@ -106,6 +141,7 @@ pub fn parse_log_file_to_run_result(path: &Path) -> Result<RunResult> {
             tool: ToolFamily::Forensics,
             operation: AndroidOperation::InspectArtifact,
             source_path: path.display().to_string(),
+            forensic_opts: opts,
             ..Default::default()
         };
         return run_job_blocking(&job, None, &CancelToken::new());
@@ -132,6 +168,7 @@ pub fn parse_log_file_to_run_result(path: &Path) -> Result<RunResult> {
         || sig.starts_with(b"PK\x03\x04")
         || sig.starts_with(b"PK\x05\x06")
         || sig.starts_with(b"dex\n")
+        || sig.starts_with(b"ABX\0")
         || (head_len >= 8 && sig.starts_with(&[0x03, 0x00, 0x08, 0x00]))
     {
         let job = AndroidJob {
@@ -143,6 +180,7 @@ pub fn parse_log_file_to_run_result(path: &Path) -> Result<RunResult> {
             tool: ToolFamily::Forensics,
             operation: AndroidOperation::InspectArtifact,
             source_path: path.display().to_string(),
+            forensic_opts: opts,
             ..Default::default()
         };
         return run_job_blocking(&job, None, &CancelToken::new());
@@ -155,11 +193,14 @@ pub fn parse_log_file_to_run_result(path: &Path) -> Result<RunResult> {
     let mut errors = Vec::new();
     let mut log_lines = Vec::new();
     let mut hasher = Sha256::new();
+    let mut hasher512 = Sha512::new();
 
     for raw in text.lines() {
         let line = raw.trim_end_matches('\r').to_string();
         hasher.update(line.as_bytes());
         hasher.update(b"\n");
+        hasher512.update(line.as_bytes());
+        hasher512.update(b"\n");
         log_lines.push(line.clone());
 
         match parser.feed_line(&line) {
@@ -196,12 +237,15 @@ pub fn parse_log_file_to_run_result(path: &Path) -> Result<RunResult> {
         errors,
         log_lines,
         log_sha256: android2rust_core::format::encode_hex_lower(&hasher.finalize()),
+        log_sha512: android2rust_core::format::encode_hex_lower(&hasher512.finalize()),
+        case_meta: opts.case_meta,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use android2rust_core::CaseMetadata;
     use tempfile::TempDir;
 
     #[test]
@@ -217,11 +261,21 @@ package:/data/app/base.apk=com.example.chat
 ";
         std::fs::write(&log_path, content).unwrap();
 
-        let parsed = parse_log_file_to_run_result(&log_path).unwrap();
+        let opts = ForensicOptions {
+            case_meta: CaseMetadata {
+                case_id: Some("IR-2026-09".to_string()),
+                evidence_id: Some("PIXEL-01".to_string()),
+                examiner: Some("J. Doe".to_string()),
+            },
+            ..Default::default()
+        };
+        let parsed = parse_log_file_with_options(&log_path, opts).unwrap();
         assert_eq!(parsed.summary.devices_seen, 1);
         assert_eq!(parsed.summary.properties_seen, 1);
         assert_eq!(parsed.summary.packages_seen, 1);
         assert_eq!(parsed.summary.errors_seen, 1);
+        assert_eq!(parsed.log_sha256.len(), 64);
+        assert_eq!(parsed.log_sha512.len(), 128);
 
         let bundle_dir = tmp.path().join("bundle");
         let written = write_report(&parsed, ReportFormat::All, &bundle_dir).unwrap();
@@ -233,6 +287,40 @@ package:/data/app/base.apk=com.example.chat
         assert!(!html.contains("https://cdn"));
         assert!(!html.contains("<script src="));
         assert!(html.contains("Pixel_7"));
+        assert!(html.contains("IR-2026-09"));
         assert!(html.contains(&parsed.log_sha256));
+        assert!(html.contains(&parsed.log_sha512));
+
+        let md = std::fs::read_to_string(&written[2]).unwrap();
+        assert!(md.contains("IR-2026-09"));
+        assert!(md.contains(&parsed.log_sha512));
+
+        // Timeline CSV & JSONL export on timestamped logcat dump
+        let logcat_path = tmp.path().join("events.txt");
+        std::fs::write(
+            &logcat_path,
+            "2025-05-01 09:00:00.100  1000  1001 E BootCheck: failure\n",
+        )
+        .unwrap();
+        let tl_res = parse_log_file_to_run_result(&logcat_path).unwrap();
+        let csv_path = write_timeline(&tl_res, &tmp.path().join("tl.csv")).unwrap();
+        let csv = std::fs::read_to_string(csv_path).unwrap();
+        assert!(csv.starts_with("timestamp,source,category,target,detail\n"));
+        assert!(csv.contains("2025-05-01T09:00:00.100Z,Run Telemetry,Error,E/logcat,BootCheck: failure"));
+
+        let jsonl_path = write_timeline(&tl_res, &tmp.path().join("tl.jsonl")).unwrap();
+        let jsonl = std::fs::read_to_string(jsonl_path).unwrap();
+        assert!(jsonl.contains("\"timestamp\":\"2025-05-01T09:00:00.100Z\""));
+
+        let prefs_path = tmp.path().join("prefs.xml");
+        std::fs::write(
+            &prefs_path,
+            r#"<map><long name="last_sync" value="1700000000000"/></map>"#,
+        )
+        .unwrap();
+        let prefs_res = parse_log_file_to_run_result(&prefs_path).unwrap();
+        let prefs_csv_path = write_timeline(&prefs_res, &tmp.path().join("prefs_tl.csv")).unwrap();
+        let prefs_csv = std::fs::read_to_string(prefs_csv_path).unwrap();
+        assert!(prefs_csv.contains("SharedPrefs,Preference Epoch,last_sync"));
     }
 }

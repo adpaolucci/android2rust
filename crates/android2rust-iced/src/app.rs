@@ -891,6 +891,10 @@ impl App {
                         ReportFormat::Html => ("Export HTML Audit Report", "android_audit.html"),
                         ReportFormat::Json => ("Export JSON Audit Report", "android_audit.json"),
                         ReportFormat::Markdown => ("Export Markdown Audit Report", "android_audit.md"),
+                        ReportFormat::TimelineCsv => ("Export Chronological Timeline (CSV)", "android_timeline.csv"),
+                        ReportFormat::TimelineJsonl => {
+                            ("Export Chronological Timeline (JSONL)", "android_timeline.jsonl")
+                        }
                         ReportFormat::All => ("Export Full Report Bundle (Base Filename)", "android_audit"),
                     };
                     if let Some(path) = rfd::FileDialog::new()

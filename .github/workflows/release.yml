@@ -78,10 +78,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build Release Binaries (x86_64 Windows MSVC CFG + CET)
+      - name: Build Release Binaries (x86_64 Windows MSVC Stack + CFG + CET)
         if: matrix.target == 'x86_64-pc-windows-msvc'
         env:
-          RUSTFLAGS: -C control-flow-guard=on -C link-arg=/CETCOMPAT
+          RUSTFLAGS: -C link-arg=/STACK:16777216 -C control-flow-guard=on -C link-arg=/CETCOMPAT
         run: cargo build --release --target ${{ matrix.target }} --workspace
 
       - name: Build Release Binaries

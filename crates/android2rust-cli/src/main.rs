@@ -2,12 +2,12 @@
 
 use android2rust_core::format::{format_bytes, format_duration};
 use android2rust_core::{
-    AndroidJob, AndroidOperation, ProfileStore, RunHistoryEntry, ScheduleSpec, ToolFamily, ValidationSeverity,
-    build_batch_script, build_powershell_script, build_schtasks_command, build_shell_script, builtin_presets,
-    decode_status_code, find_preset, format_command_line, init_logging, parse_command_line, parse_recipe,
-    serialize_recipe, validate_job,
+    AndroidJob, AndroidOperation, CaseMetadata, ForensicOptions, ProfileStore, RunHistoryEntry, ScheduleSpec,
+    ToolFamily, ValidationSeverity, build_batch_script, build_powershell_script, build_schtasks_command,
+    build_shell_script, builtin_presets, decode_status_code, find_preset, format_command_line, init_logging,
+    parse_command_line, parse_recipe, serialize_recipe, validate_job,
 };
-use android2rust_report::{ReportFormat, parse_log_file_to_run_result, write_report};
+use android2rust_report::{ReportFormat, parse_log_file_with_options, write_report, write_timeline};
 use android2rust_runner::{
     CancelToken, RunResult, RunnerEvent, detect_environment, run_job_blocking, spawn_job_runner,
 };
@@ -160,9 +160,42 @@ pub struct ParseArgs {
     pub json: bool,
 }
 
+#[derive(Args, Debug, Clone, Default)]
+pub struct ProvenanceArgs {
+    /// Case identifier for chain-of-custody report headers
+    #[arg(long)]
+    pub case_id: Option<String>,
+
+    /// Evidence / exhibit identifier for chain-of-custody report headers
+    #[arg(long)]
+    pub evidence_id: Option<String>,
+
+    /// Examiner name for chain-of-custody report headers
+    #[arg(long)]
+    pub examiner: Option<String>,
+}
+
+fn resolve_ab_password(flag: Option<&str>) -> Option<String> {
+    flag.map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("ANDROID2RUST_AB_PASSWORD").ok().filter(|s| !s.is_empty()))
+}
+
+fn build_forensic_opts(prov: &ProvenanceArgs, password: Option<&str>) -> ForensicOptions {
+    ForensicOptions {
+        case_meta: CaseMetadata {
+            case_id: prov.case_id.clone(),
+            evidence_id: prov.evidence_id.clone(),
+            examiner: prov.examiner.clone(),
+        },
+        ab_password: resolve_ab_password(password),
+        ..Default::default()
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct InspectArgs {
-    /// Local path to .apk, .ab, SQLite .db, XML, directory, or log dump
+    /// Local path to .apk, .ab, SQLite .db, ABX, XML, bugreport .zip, directory, or log dump
     pub path: PathBuf,
 
     #[arg(long)]
@@ -170,6 +203,17 @@ pub struct InspectArgs {
 
     #[arg(long, default_value = "html")]
     pub format: String,
+
+    /// Optional output path for chronological CSV or JSONL timeline export (.csv or .jsonl)
+    #[arg(long)]
+    pub timeline: Option<PathBuf>,
+
+    /// Optional passphrase to lawfully decrypt encrypted .ab backups (or set ANDROID2RUST_AB_PASSWORD)
+    #[arg(long)]
+    pub password: Option<String>,
+
+    #[command(flatten)]
+    pub provenance: ProvenanceArgs,
 
     #[arg(long)]
     pub json: bool,
@@ -185,6 +229,13 @@ pub struct ExecArgs {
 
     #[arg(long, default_value = "html")]
     pub report_format: String,
+
+    /// Optional output path for chronological CSV or JSONL timeline export (.csv or .jsonl)
+    #[arg(long)]
+    pub timeline: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub provenance: ProvenanceArgs,
 
     #[arg(long)]
     pub json: bool,
@@ -249,6 +300,17 @@ pub struct ReportArgs {
 
     #[arg(long, default_value = "html")]
     pub format: String,
+
+    /// Optional output path for chronological CSV or JSONL timeline export (.csv or .jsonl)
+    #[arg(long)]
+    pub timeline: Option<PathBuf>,
+
+    /// Optional passphrase to lawfully decrypt encrypted .ab backups (or set ANDROID2RUST_AB_PASSWORD)
+    #[arg(long)]
+    pub password: Option<String>,
+
+    #[command(flatten)]
+    pub provenance: ProvenanceArgs,
 }
 
 #[derive(Args, Debug, Default)]
@@ -410,6 +472,12 @@ fn execute_and_report(job: AndroidJob, exec: &ExecArgs) -> Result<i32> {
             }
         }
     }
+    if let Some(tl_out) = &exec.timeline {
+        let tl_path = write_timeline(&res, tl_out)?;
+        if !exec.json {
+            println!("Timeline written: {}", tl_path.display());
+        }
+    }
 
     if exec.json {
         println!("{}", serde_json::to_string_pretty(&res)?);
@@ -430,6 +498,9 @@ fn execute_and_report(job: AndroidJob, exec: &ExecArgs) -> Result<i32> {
             format_bytes(res.summary.bytes_processed),
         );
         println!("SHA-256   : {}", res.log_sha256);
+        if !res.log_sha512.is_empty() {
+            println!("SHA-512   : {}", res.log_sha512);
+        }
     }
 
     if res.status_info.is_success {
@@ -624,6 +695,7 @@ fn run_cli(cli: Cli) -> Result<i32> {
                 tool: ToolFamily::Forensics,
                 operation: AndroidOperation::InspectArtifact,
                 source_path: ins.path.display().to_string(),
+                forensic_opts: build_forensic_opts(&ins.provenance, ins.password.as_deref()),
                 ..Default::default()
             };
             let run_res = run_job_blocking(&job, None, &CancelToken::new())?;
@@ -640,6 +712,12 @@ fn run_cli(cli: Cli) -> Result<i32> {
                     }
                 }
             }
+            if let Some(tl_out) = &ins.timeline {
+                let tl_path = write_timeline(&run_res, tl_out)?;
+                if !ins.json {
+                    println!("Timeline written: {}", tl_path.display());
+                }
+            }
             if ins.json {
                 println!("{}", serde_json::to_string_pretty(rep)?);
             } else {
@@ -647,6 +725,12 @@ fn run_cli(cli: Cli) -> Result<i32> {
                 println!("Format   : {}", rep.kind.label());
                 println!("Size     : {}", format_bytes(rep.total_bytes));
                 println!("SHA-256  : {}", rep.sha256);
+                if !rep.sha512.is_empty() {
+                    println!("SHA-512  : {}", rep.sha512);
+                }
+                if !rep.timeline.is_empty() {
+                    println!("Timeline : {} events", rep.timeline.len());
+                }
                 for (k, v) in &rep.metadata {
                     println!("  {k:<22}: {v}");
                 }
@@ -672,11 +756,21 @@ fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::DryRun(exec) => {
-            let job = assemble_job(&exec.job_args)?.with_dry_run();
+            let mut job = assemble_job(&exec.job_args)?.with_dry_run();
+            job.forensic_opts.case_meta = CaseMetadata {
+                case_id: exec.provenance.case_id.clone(),
+                evidence_id: exec.provenance.evidence_id.clone(),
+                examiner: exec.provenance.examiner.clone(),
+            };
             execute_and_report(job, &exec)
         }
         Commands::Run(run) => {
-            let job = assemble_job(&run.exec.job_args)?;
+            let mut job = assemble_job(&run.exec.job_args)?;
+            job.forensic_opts.case_meta = CaseMetadata {
+                case_id: run.exec.provenance.case_id.clone(),
+                evidence_id: run.exec.provenance.evidence_id.clone(),
+                examiner: run.exec.provenance.examiner.clone(),
+            };
             if job.is_destructive() && !run.yes {
                 let reasons = job.destructive_reasons().join(", ");
                 bail!(
@@ -757,10 +851,15 @@ fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Report(rep) => {
             let fmt = ReportFormat::parse(&rep.format)?;
-            let res = parse_log_file_to_run_result(&rep.log_file)?;
+            let opts = build_forensic_opts(&rep.provenance, rep.password.as_deref());
+            let res = parse_log_file_with_options(&rep.log_file, opts)?;
             let written = write_report(&res, fmt, &rep.output)?;
             for p in written {
                 println!("Generated report: {}", p.display());
+            }
+            if let Some(tl_out) = &rep.timeline {
+                let tl_path = write_timeline(&res, tl_out)?;
+                println!("Timeline written: {}", tl_path.display());
             }
             Ok(0)
         }
@@ -870,5 +969,35 @@ mod tests {
         let err = run_cli(cli).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("--yes"), "expected --yes refusal prompt, got: {msg}");
+    }
+
+    #[test]
+    fn inspect_and_report_parse_provenance_password_and_timeline_flags() {
+        let cli = Cli::try_parse_from([
+            "android2rust",
+            "inspect",
+            "backup.ab",
+            "--password",
+            "pass123",
+            "--case-id",
+            "IR-01",
+            "--evidence-id",
+            "EV-02",
+            "--examiner",
+            "Examiner",
+            "--timeline",
+            "out.jsonl",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Inspect(ins)) => {
+                assert_eq!(ins.password.as_deref(), Some("pass123"));
+                assert_eq!(ins.provenance.case_id.as_deref(), Some("IR-01"));
+                assert_eq!(ins.provenance.evidence_id.as_deref(), Some("EV-02"));
+                assert_eq!(ins.provenance.examiner.as_deref(), Some("Examiner"));
+                assert_eq!(ins.timeline.as_deref(), Some(Path::new("out.jsonl")));
+            }
+            other => panic!("Unexpected command: {other:?}"),
+        }
     }
 }

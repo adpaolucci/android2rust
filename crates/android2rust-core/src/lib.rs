@@ -16,12 +16,12 @@ pub use command::{
     ScheduleCadence, ScheduleSpec, build_args, build_batch_script, build_powershell_script, build_schtasks_command,
     build_shell_script, format_command_line, quote_posix_arg, quote_windows_arg,
 };
-pub use forensics::{ArtifactKind, ForensicEntry, ForensicReport, inspect_artifact};
+pub use forensics::{ArtifactKind, ForensicEntry, ForensicReport, TimelineEvent, inspect_artifact};
 pub use format::{encode_hex_lower, format_bytes, format_duration};
 pub use logging::init_logging;
 pub use model::{
-    AndroidJob, AndroidOperation, BackupOptions, FastbootOptions, ForensicOptions, LogcatOptions, PackageOptions,
-    RebootTarget, ToolFamily, TransferOptions, TransportMode,
+    AndroidJob, AndroidOperation, BackupOptions, CaseMetadata, FastbootOptions, ForensicOptions, LogcatOptions,
+    PackageOptions, RebootTarget, ToolFamily, TransferOptions, TransportMode,
 };
 pub use parser::{ParseResult, parse_command_line, tokenize_windows_cmdline};
 pub use presets::{JobPreset, builtin_presets, find_preset};

@@ -1,13 +1,13 @@
 use crate::env::{find_adb_executable, find_fastboot_executable};
 use crate::output_parser::{AndroidOutputParser, FileActionKind, FileActionRecord, ParsedLineOutcome, RunSummary};
 use android2rust_core::{
-    AndroidJob, AndroidOperation, ForensicReport, StatusCodeInfo, ToolFamily, build_args, decode_exit_code,
-    decode_status_code, format_command_line, inspect_artifact, validate_job,
+    AndroidJob, AndroidOperation, CaseMetadata, ForensicReport, StatusCodeInfo, ToolFamily, build_args,
+    decode_exit_code, decode_status_code, format_command_line, inspect_artifact, validate_job,
 };
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -38,6 +38,10 @@ pub struct RunResult {
     pub errors: Vec<String>,
     pub log_lines: Vec<String>,
     pub log_sha256: String,
+    #[serde(default)]
+    pub log_sha512: String,
+    #[serde(default)]
+    pub case_meta: CaseMetadata,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +107,9 @@ pub fn spawn_job_runner(job: AndroidJob, binary_override: Option<PathBuf>) -> (R
                 let mut hasher = Sha256::new();
                 hasher.update(err_msg.as_bytes());
                 let digest = android2rust_core::format::encode_hex_lower(&hasher.finalize());
+                let mut hasher512 = Sha512::new();
+                hasher512.update(err_msg.as_bytes());
+                let digest512 = android2rust_core::format::encode_hex_lower(&hasher512.finalize());
                 let (_, args) = build_args(&job);
                 let fallback = RunResult {
                     job_name: job.name.clone(),
@@ -128,6 +135,8 @@ pub fn spawn_job_runner(job: AndroidJob, binary_override: Option<PathBuf>) -> (R
                     errors: vec![err_msg.clone()],
                     log_lines: vec![err_msg],
                     log_sha256: digest,
+                    log_sha512: digest512,
+                    case_meta: job.forensic_opts.case_meta.clone(),
                 };
                 let _ = tx.send(RunnerEvent::Finished(Box::new(fallback)));
             }
@@ -217,6 +226,7 @@ fn execute_job_internal(
     let mut errors = Vec::new();
     let mut log_lines = Vec::new();
     let mut hasher = Sha256::new();
+    let mut hasher512 = Sha512::new();
 
     for (is_err, line) in line_rx {
         if cancel.is_cancelled() {
@@ -224,6 +234,8 @@ fn execute_job_internal(
         }
         hasher.update(line.as_bytes());
         hasher.update(b"\n");
+        hasher512.update(line.as_bytes());
+        hasher512.update(b"\n");
 
         if is_err {
             if !line.trim().is_empty() {
@@ -341,6 +353,8 @@ fn execute_job_internal(
         errors,
         log_lines,
         log_sha256: android2rust_core::format::encode_hex_lower(&hasher.finalize()),
+        log_sha512: android2rust_core::format::encode_hex_lower(&hasher512.finalize()),
+        case_meta: job.forensic_opts.case_meta.clone(),
     })
 }
 
@@ -363,6 +377,7 @@ fn execute_forensic_job(
         format!("Detected Format: {}", report.kind.label()),
         format!("Size: {} bytes", report.total_bytes),
         format!("SHA-256: {}", report.sha256),
+        format!("SHA-512: {}", report.sha512),
     ];
     for (k, v) in &report.metadata {
         log_lines.push(format!("{k}: {v}"));
@@ -428,9 +443,12 @@ fn execute_forensic_job(
     emit(RunnerEvent::Summary(summary.clone()));
 
     let mut hasher = Sha256::new();
+    let mut hasher512 = Sha512::new();
     for l in &log_lines {
         hasher.update(l.as_bytes());
         hasher.update(b"\n");
+        hasher512.update(l.as_bytes());
+        hasher512.update(b"\n");
     }
 
     Ok(RunResult {
@@ -454,6 +472,8 @@ fn execute_forensic_job(
         errors: Vec::new(),
         log_lines,
         log_sha256: android2rust_core::format::encode_hex_lower(&hasher.finalize()),
+        log_sha512: android2rust_core::format::encode_hex_lower(&hasher512.finalize()),
+        case_meta: job.forensic_opts.case_meta.clone(),
     })
 }
 
@@ -518,9 +538,12 @@ fn execute_dry_run_simulation(
     emit(RunnerEvent::Summary(summary.clone()));
 
     let mut hasher = Sha256::new();
+    let mut hasher512 = Sha512::new();
     for l in &log_lines {
         hasher.update(l.as_bytes());
         hasher.update(b"\n");
+        hasher512.update(l.as_bytes());
+        hasher512.update(b"\n");
     }
 
     let exit_code = if errors.is_empty() { 0 } else { 1 };
@@ -546,6 +569,8 @@ fn execute_dry_run_simulation(
         errors,
         log_lines,
         log_sha256: android2rust_core::format::encode_hex_lower(&hasher.finalize()),
+        log_sha512: android2rust_core::format::encode_hex_lower(&hasher512.finalize()),
+        case_meta: job.forensic_opts.case_meta.clone(),
     })
 }
 
