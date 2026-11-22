@@ -234,6 +234,10 @@ pub struct ExecArgs {
     #[arg(long)]
     pub timeline: Option<PathBuf>,
 
+    /// Optional passphrase to lawfully decrypt encrypted .ab backups (or set ANDROID2RUST_AB_PASSWORD)
+    #[arg(long)]
+    pub password: Option<String>,
+
     #[command(flatten)]
     pub provenance: ProvenanceArgs,
 
@@ -335,9 +339,44 @@ pub struct GuiArgs {
     pub profile: Option<String>,
 }
 
+const MAX_RECIPE_BYTES: usize = 4 * 1024 * 1024;
+
+fn read_recipe_bounded(path: &Path) -> Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(&mut file, (MAX_RECIPE_BYTES + 1) as u64),
+        &mut out,
+    )
+    .with_context(|| format!("Failed to read {}", path.display()))?;
+    if out.len() > MAX_RECIPE_BYTES {
+        bail!(
+            "Recipe file {} exceeds maximum allowed size ({} MiB).",
+            path.display(),
+            MAX_RECIPE_BYTES / (1024 * 1024)
+        );
+    }
+    Ok(out)
+}
+
+fn merge_provenance_and_password(job: &mut AndroidJob, prov: &ProvenanceArgs, password: Option<&str>) {
+    if let Some(cid) = &prov.case_id {
+        job.forensic_opts.case_meta.case_id = Some(cid.clone());
+    }
+    if let Some(eid) = &prov.evidence_id {
+        job.forensic_opts.case_meta.evidence_id = Some(eid.clone());
+    }
+    if let Some(ex) = &prov.examiner {
+        job.forensic_opts.case_meta.examiner = Some(ex.clone());
+    }
+    if let Some(pw) = resolve_ab_password(password) {
+        job.forensic_opts.ab_password = Some(pw);
+    }
+}
+
 fn assemble_job(args: &JobSourceArgs) -> Result<AndroidJob> {
     let mut job = if let Some(recipe_path) = &args.recipe {
-        let bytes = std::fs::read(recipe_path).with_context(|| format!("Failed to read {}", recipe_path.display()))?;
+        let bytes = read_recipe_bounded(recipe_path)?;
         let (parsed, warnings) = parse_recipe(&bytes)?;
         for w in warnings {
             eprintln!("[warn] .a2r: {w}");
@@ -643,7 +682,7 @@ fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Parse(p) => {
             let (job, warnings) = if p.recipe {
-                let bytes = std::fs::read(&p.input)?;
+                let bytes = read_recipe_bounded(Path::new(&p.input))?;
                 parse_recipe(&bytes)?
             } else {
                 let parsed = parse_command_line(&p.input);
@@ -757,20 +796,12 @@ fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::DryRun(exec) => {
             let mut job = assemble_job(&exec.job_args)?.with_dry_run();
-            job.forensic_opts.case_meta = CaseMetadata {
-                case_id: exec.provenance.case_id.clone(),
-                evidence_id: exec.provenance.evidence_id.clone(),
-                examiner: exec.provenance.examiner.clone(),
-            };
+            merge_provenance_and_password(&mut job, &exec.provenance, exec.password.as_deref());
             execute_and_report(job, &exec)
         }
         Commands::Run(run) => {
             let mut job = assemble_job(&run.exec.job_args)?;
-            job.forensic_opts.case_meta = CaseMetadata {
-                case_id: run.exec.provenance.case_id.clone(),
-                evidence_id: run.exec.provenance.evidence_id.clone(),
-                examiner: run.exec.provenance.examiner.clone(),
-            };
+            merge_provenance_and_password(&mut job, &run.exec.provenance, run.exec.password.as_deref());
             if job.is_destructive() && !run.yes {
                 let reasons = job.destructive_reasons().join(", ");
                 bail!(
@@ -834,7 +865,7 @@ fn run_cli(cli: Cli) -> Result<i32> {
                     recipe_path,
                     description,
                 } => {
-                    let bytes = std::fs::read(&recipe_path)?;
+                    let bytes = read_recipe_bounded(&recipe_path)?;
                     let (job, _) = parse_recipe(&bytes)?;
                     store.upsert_profile(&name, &description, job)?;
                     println!("Imported {} into profile '{name}'.", recipe_path.display());
@@ -996,6 +1027,32 @@ mod tests {
                 assert_eq!(ins.provenance.evidence_id.as_deref(), Some("EV-02"));
                 assert_eq!(ins.provenance.examiner.as_deref(), Some("Examiner"));
                 assert_eq!(ins.timeline.as_deref(), Some(Path::new("out.jsonl")));
+            }
+            other => panic!("Unexpected command: {other:?}"),
+        }
+
+        let runtime_pw = format!("cli-pw-{}", std::process::id());
+        let dry_cli = Cli::try_parse_from([
+            "android2rust",
+            "dry-run",
+            "--op",
+            "inspect",
+            "--source",
+            "backup.ab",
+            "--password",
+            &runtime_pw,
+            "--examiner",
+            "Override",
+        ])
+        .unwrap();
+        match dry_cli.command {
+            Some(Commands::DryRun(exec)) => {
+                let mut job = assemble_job(&exec.job_args).unwrap();
+                job.forensic_opts.case_meta.case_id = Some("RECIPE-CASE".to_string());
+                merge_provenance_and_password(&mut job, &exec.provenance, exec.password.as_deref());
+                assert_eq!(job.forensic_opts.case_meta.case_id.as_deref(), Some("RECIPE-CASE"));
+                assert_eq!(job.forensic_opts.case_meta.examiner.as_deref(), Some("Override"));
+                assert_eq!(job.forensic_opts.ab_password.as_deref(), Some(runtime_pw.as_str()));
             }
             other => panic!("Unexpected command: {other:?}"),
         }

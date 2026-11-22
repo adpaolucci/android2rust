@@ -162,25 +162,60 @@ pub fn parse_command_line(input: &str) -> ParseResult {
     }
 
     let sub = tokens.get(idx).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
-    if job.tool == ToolFamily::Forensics || sub == "inspect" {
+    if (job.tool == ToolFamily::Forensics && (sub.is_empty() || sub == "inspect")) || sub == "inspect" {
         job.tool = ToolFamily::Forensics;
         job.operation = AndroidOperation::InspectArtifact;
         job.name = "Parsed Forensic Inspection".to_string();
         job.description = format!("Imported command: {}", job.operation.label());
-        let rest = &tokens[idx.saturating_add(1)..];
+        let rest_start = if sub == "inspect" { idx + 1 } else { idx };
+        let rest = &tokens[rest_start..];
         let mut r = 0;
         while r < rest.len() {
-            if rest[r] == "--report" && r + 1 < rest.len() {
-                job.target_path = rest[r + 1].clone();
-                r += 2;
-            } else if job.source_path.is_empty() && !rest[r].starts_with('-') {
-                job.source_path = rest[r].clone();
-                r += 1;
-            } else {
-                unrecognized.push(rest[r].clone());
-                r += 1;
+            match rest[r].as_str() {
+                "--report" if r + 1 < rest.len() => {
+                    job.target_path = rest[r + 1].clone();
+                    r += 2;
+                }
+                "--case-id" if r + 1 < rest.len() => {
+                    job.forensic_opts.case_meta.case_id = Some(rest[r + 1].clone());
+                    r += 2;
+                }
+                "--evidence-id" if r + 1 < rest.len() => {
+                    job.forensic_opts.case_meta.evidence_id = Some(rest[r + 1].clone());
+                    r += 2;
+                }
+                "--examiner" if r + 1 < rest.len() => {
+                    job.forensic_opts.case_meta.examiner = Some(rest[r + 1].clone());
+                    r += 2;
+                }
+                "--password" if r + 1 < rest.len() => {
+                    job.forensic_opts.ab_password = Some(rest[r + 1].clone());
+                    r += 2;
+                }
+                "--format" | "--timeline" if r + 1 < rest.len() => {
+                    job.extra_args.push(rest[r].clone());
+                    job.extra_args.push(rest[r + 1].clone());
+                    r += 2;
+                }
+                other if job.source_path.is_empty() && !other.starts_with('-') => {
+                    job.source_path = other.to_string();
+                    r += 1;
+                }
+                other => {
+                    unrecognized.push(other.to_string());
+                    r += 1;
+                }
             }
         }
+        return ParseResult {
+            job,
+            unrecognized_tokens: unrecognized,
+        };
+    } else if job.tool == ToolFamily::Forensics {
+        unrecognized.extend(tokens[idx..].iter().cloned());
+        job.tool = ToolFamily::Adb;
+        job.operation = AndroidOperation::Devices;
+        job.description = "Unrecognized android2rust subcommand".to_string();
         return ParseResult {
             job,
             unrecognized_tokens: unrecognized,
@@ -581,5 +616,24 @@ mod tests {
             format_command_line(&disable.job),
             "adb shell pm disable-user --user 10 com.example.bloat"
         );
+    }
+
+    #[test]
+    fn parses_forensic_provenance_without_coercing_other_subcommands() {
+        let ins = parse_command_line(
+            r#"android2rust inspect "C:\Evidence\app.apk" --report audit.html --case-id IR-9 --evidence-id EV-2 --examiner "A.B" --format json"#,
+        );
+        assert!(ins.unrecognized_tokens.is_empty(), "{:?}", ins.unrecognized_tokens);
+        assert_eq!(ins.job.operation, AndroidOperation::InspectArtifact);
+        assert_eq!(ins.job.source_path, r"C:\Evidence\app.apk");
+        assert_eq!(ins.job.target_path, "audit.html");
+        assert_eq!(ins.job.forensic_opts.case_meta.case_id.as_deref(), Some("IR-9"));
+        assert_eq!(ins.job.forensic_opts.case_meta.evidence_id.as_deref(), Some("EV-2"));
+        assert_eq!(ins.job.forensic_opts.case_meta.examiner.as_deref(), Some("A.B"));
+        assert_eq!(ins.job.extra_args, vec!["--format", "json"]);
+
+        let non_inspect = parse_command_line("android2rust run --preset device-triage");
+        assert_ne!(non_inspect.job.operation, AndroidOperation::InspectArtifact);
+        assert!(!non_inspect.unrecognized_tokens.is_empty());
     }
 }

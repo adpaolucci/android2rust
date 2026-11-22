@@ -254,29 +254,29 @@ pub fn view_fastboot_partitions(app: &App) -> Element<'_, Message> {
 pub fn view_forensics_artifacts(app: &App) -> Element<'_, Message> {
     let f = &app.job.forensic_opts;
     let header = page_header(
-        "Pure-Rust Offline Android Forensics & Extra Arguments",
+        "Pure-Rust Offline Android Forensics & Case Provenance",
         button(text("Run Offline Inspection Now").size(12))
-            .on_press(Message::TriggerExecute)
+            .on_press(Message::RunOfflineInspectionNow)
             .style(button::primary),
     );
 
     let card = column![
-        text("Zero external dependencies: inspects .apk (ZIP/DEX/AndroidManifest permissions), .ab backups (zlib TAR), SQLite 3 schemas/WAL, shared_prefs XMLs, and directories.").size(13),
+        text("Zero external dependencies: inspects .apk (AXML security flags, v1/v2/v3/v3.1 signatures, Janus & Zip-Slip), .ab backups (plain or PBKDF2/AES-256-CBC decrypted), Android 12+ ABX, adb bugreport .zip dumps, SQLite 3 schemas/freelist/WAL companions, shared_prefs XMLs, and extracted directories.").size(13),
         row![
             checkbox(f.compute_sha256)
-                .label("Compute SHA-256 chain-of-custody digest")
+                .label("Compute dual SHA-256 & SHA-512 chain-of-custody digests")
                 .on_toggle(Message::ToggleForensicSha256),
             checkbox(f.extract_manifest_permissions)
-                .label("Scan AndroidManifest.xml permissions")
+                .label("Extract AndroidManifest.xml permissions")
                 .on_toggle(Message::ToggleForensicPerms),
         ]
         .spacing(16),
         row![
             checkbox(f.inspect_sqlite_tables)
-                .label("Scan SQLite 3 tables & WAL headers")
+                .label("Scan SQLite 3 tables, freelist & -wal/-shm/-journal companions")
                 .on_toggle(Message::ToggleForensicSqlite),
             checkbox(f.inspect_ab_tar_entries)
-                .label("Decompress & list unencrypted .ab TAR entries")
+                .label("Decompress / decrypt .ab backup & list TAR entries")
                 .on_toggle(Message::ToggleForensicTar),
         ]
         .spacing(16),
@@ -298,7 +298,51 @@ pub fn view_forensics_artifacts(app: &App) -> Element<'_, Message> {
     ]
     .spacing(10);
 
-    scrollable(column![header, section_card("Offline Forensic Engine Settings", card)].spacing(12))
-        .height(Length::Fill)
-        .into()
+    let prov_card = column![
+        row![
+            text("Case ID:").size(13),
+            text_input("e.g. IR-2026-04", f.case_meta.case_id.as_deref().unwrap_or(""))
+                .on_input(Message::CaseIdChanged)
+                .size(13)
+                .width(Length::Fill),
+            text("Evidence ID:").size(13),
+            text_input("e.g. EV-01", f.case_meta.evidence_id.as_deref().unwrap_or(""))
+                .on_input(Message::EvidenceIdChanged)
+                .size(13)
+                .width(Length::Fill),
+            text("Examiner:").size(13),
+            text_input("Examiner name", f.case_meta.examiner.as_deref().unwrap_or(""))
+                .on_input(Message::ExaminerChanged)
+                .size(13)
+                .width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+        row![
+            text(".ab Passphrase (RAM only):").size(13),
+            text_input(
+                "Optional passphrase to decrypt encrypted .ab backup",
+                f.ab_password.as_deref().unwrap_or(""),
+            )
+            .on_input(Message::AbPasswordChanged)
+            .secure(true)
+            .size(13)
+            .width(Length::Fixed(320.0)),
+            text("Never serialized to .a2r recipes, profiles.json, or JSON reports.").size(12),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(10);
+
+    scrollable(
+        column![
+            header,
+            section_card("Offline Forensic Engine Settings", card),
+            section_card("Case Provenance & Encrypted .ab Decryption", prov_card),
+        ]
+        .spacing(12),
+    )
+    .height(Length::Fill)
+    .into()
 }

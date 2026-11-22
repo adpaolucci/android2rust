@@ -10,6 +10,9 @@ pub(super) struct ManifestSecurityInfo {
     pub debuggable: Option<bool>,
     pub allow_backup: Option<bool>,
     pub uses_cleartext_traffic: Option<bool>,
+    pub test_only: Option<bool>,
+    pub has_network_security_config: bool,
+    pub exported_components: usize,
     pub permissions: BTreeSet<String>,
 }
 
@@ -71,6 +74,21 @@ pub(super) fn append_manifest_security(
             );
         }
     }
+    if let Some(to) = info.test_only {
+        metadata.push(("Test Only".to_string(), to.to_string()));
+        if to {
+            warnings.push(
+                "Manifest sets android:testOnly=\"true\" — restricted test build requiring `adb install -t`."
+                    .to_string(),
+            );
+        }
+    }
+    if info.has_network_security_config {
+        metadata.push(("Network Security Config".to_string(), "Configured".to_string()));
+    }
+    if info.exported_components > 0 {
+        metadata.push(("Exported Components".to_string(), info.exported_components.to_string()));
+    }
 }
 
 fn parse_bool_str(s: &str) -> Option<bool> {
@@ -107,6 +125,17 @@ fn record_tag_attr(info: &mut ManifestSecurityInfo, tag: &str, attr: &str, val: 
         }
         ("application", "usesCleartextTraffic") => {
             info.uses_cleartext_traffic = parse_bool_str(&val);
+        }
+        ("application", "testOnly") => {
+            info.test_only = parse_bool_str(&val);
+        }
+        ("application", "networkSecurityConfig") if !val.trim().is_empty() => {
+            info.has_network_security_config = true;
+        }
+        ("activity" | "activity-alias" | "service" | "receiver" | "provider", "exported")
+            if parse_bool_str(&val) == Some(true) =>
+        {
+            info.exported_components += 1;
         }
         ("uses-permission" | "uses-permission-sdk-23", "name") if !val.is_empty() => {
             info.permissions.insert(val);
@@ -209,12 +238,15 @@ fn parse_binary_axml(bytes: &[u8]) -> ManifestSecurityInfo {
                         let canonical_attr = match attr_res_id {
                             Some(0x0101_0003) => "name",
                             Some(0x0101_000f) => "debuggable",
+                            Some(0x0101_0010) => "exported",
                             Some(0x0101_020c) => "minSdkVersion",
                             Some(0x0101_021b) => "versionCode",
                             Some(0x0101_021c) => "versionName",
                             Some(0x0101_0270) => "targetSdkVersion",
+                            Some(0x0101_0272) => "testOnly",
                             Some(0x0101_0280) => "allowBackup",
                             Some(0x0101_04ec) => "usesCleartextTraffic",
+                            Some(0x0101_0527) => "networkSecurityConfig",
                             _ => pool_attr_name,
                         };
 
@@ -229,6 +261,7 @@ fn parse_binary_axml(bytes: &[u8]) -> ManifestSecurityInfo {
                             .filter(|s| !s.is_empty())
                             .cloned();
                         let resolved = raw_val.or_else(|| match data_type {
+                            0x01 => Some(format!("@0x{data:08x}")),
                             0x03 => string_pool.get(data as usize).cloned(),
                             0x10 => Some((data as i32).to_string()),
                             0x11 => Some(format!("0x{data:x}")),
@@ -334,6 +367,39 @@ fn parse_plaintext_manifest(bytes: &[u8]) -> ManifestSecurityInfo {
             .or_else(|| super::extract_xml_attr(tag, "usesCleartextTraffic"))
         {
             record_tag_attr(&mut info, "application", "usesCleartextTraffic", v);
+        }
+        if let Some(v) =
+            super::extract_xml_attr(tag, "android:testOnly").or_else(|| super::extract_xml_attr(tag, "testOnly"))
+        {
+            record_tag_attr(&mut info, "application", "testOnly", v);
+        }
+        if let Some(v) = super::extract_xml_attr(tag, "android:networkSecurityConfig")
+            .or_else(|| super::extract_xml_attr(tag, "networkSecurityConfig"))
+        {
+            record_tag_attr(&mut info, "application", "networkSecurityConfig", v);
+        }
+    }
+
+    for comp in ["<activity", "<activity-alias", "<service", "<receiver", "<provider"] {
+        let mut cidx = 0usize;
+        while let Some(pos) = text[cidx..].find(comp) {
+            let start = cidx + pos;
+            let rest = &text[start..];
+            let Some(end_rel) = rest.find('>') else {
+                break;
+            };
+            let tag = &rest[..=end_rel];
+            let tag_name = tag[1..]
+                .split(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                .next()
+                .unwrap_or("");
+            if tag_name == &comp[1..]
+                && let Some(exp) = super::extract_xml_attr(tag, "android:exported")
+                    .or_else(|| super::extract_xml_attr(tag, "exported"))
+            {
+                record_tag_attr(&mut info, tag_name, "exported", exp);
+            }
+            cidx = start + end_rel + 1;
         }
     }
 

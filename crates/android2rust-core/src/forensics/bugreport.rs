@@ -413,7 +413,7 @@ fn extract_account_name(snippet: &str) -> String {
 }
 
 fn normalize_space_ts_to_iso(raw: &str) -> Option<String> {
-    // Converts "YYYY-MM-DD HH:MM:SS" (plus optional fractional seconds) into "YYYY-MM-DDTHH:MM:SSZ"
+    // Converts "YYYY-MM-DD HH:MM:SS[.fff][Z|+HH:MM]" into ISO-like local/aware "YYYY-MM-DDTHH:MM:SS..."
     let s = raw.trim();
     let b = s.as_bytes();
     if b.len() >= 19
@@ -429,7 +429,24 @@ fn normalize_space_ts_to_iso(raw: &str) -> Option<String> {
         && b[16] == b':'
         && b[17..19].iter().all(u8::is_ascii_digit)
     {
-        return Some(format!("{}Z", s[..19].replacen(' ', "T", 1)));
+        let mut end = 19;
+        if end < b.len() && b[end] == b'.' && end + 1 < b.len() && b[end + 1].is_ascii_digit() {
+            end += 1;
+            while end < b.len() && b[end].is_ascii_digit() {
+                end += 1;
+            }
+        }
+        if end < b.len() && b[end] == b'Z' {
+            end += 1;
+        } else if end + 6 <= b.len()
+            && matches!(b[end], b'+' | b'-')
+            && b[end + 1..end + 3].iter().all(u8::is_ascii_digit)
+            && b[end + 3] == b':'
+            && b[end + 4..end + 6].iter().all(u8::is_ascii_digit)
+        {
+            end += 6;
+        }
+        return Some(s[..end].replacen(' ', "T", 1));
     }
     None
 }

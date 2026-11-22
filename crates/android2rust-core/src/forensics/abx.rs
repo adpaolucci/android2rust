@@ -211,7 +211,8 @@ pub(super) fn inspect_abx_bytes(
                 if opts.extract_manifest_permissions {
                     collect_permissions_from_str(&val_str, &mut permissions);
                 }
-                if let Some(ms) = long_val
+                if timeline.len() < opts.max_entries
+                    && let Some(ms) = long_val
                     && let Some(ts) = epoch_ms_to_rfc3339(ms)
                 {
                     timeline.push(TimelineEvent {

@@ -122,7 +122,11 @@ pub fn get_tools_manifest() -> Value {
                     "target": { "type": "string" },
                     "serial": { "type": "string" },
                     "slot": { "type": "string", "description": "Optional Fastboot A/B slot (--slot a | b | all)" },
-                    "preset": { "type": "string" }
+                    "preset": { "type": "string" },
+                    "ab_password": { "type": "string", "description": "Optional passphrase for encrypted .ab pre-verification" },
+                    "case_id": { "type": "string", "description": "Optional case identifier for chain-of-custody metadata" },
+                    "evidence_id": { "type": "string", "description": "Optional evidence/exhibit identifier" },
+                    "examiner": { "type": "string", "description": "Optional examiner name" }
                 }
             }
         },
@@ -140,6 +144,10 @@ pub fn get_tools_manifest() -> Value {
                     "serial": { "type": "string" },
                     "slot": { "type": "string", "description": "Optional Fastboot A/B slot (--slot a | b | all)" },
                     "preset": { "type": "string" },
+                    "ab_password": { "type": "string", "description": "Optional passphrase for encrypted .ab inspection" },
+                    "case_id": { "type": "string", "description": "Optional case identifier for chain-of-custody metadata" },
+                    "evidence_id": { "type": "string", "description": "Optional evidence/exhibit identifier" },
+                    "examiner": { "type": "string", "description": "Optional examiner name" },
                     "confirm_destructive": { "type": "boolean", "description": "Explicitly confirm destructive ADB/Fastboot execution" }
                 }
             }
@@ -278,8 +286,21 @@ pub fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
         }
         "android2rust_parse_command" => {
             if let Some(recipe_path) = args["recipe_path"].as_str() {
-                let bytes = std::fs::read(recipe_path)
+                const MAX_RECIPE_BYTES: usize = 4 * 1024 * 1024;
+                let file = std::fs::File::open(recipe_path)
                     .map_err(|e| format!("Failed reading .a2r recipe '{recipe_path}': {e}"))?;
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(
+                    &mut std::io::Read::take(file, (MAX_RECIPE_BYTES + 1) as u64),
+                    &mut bytes,
+                )
+                .map_err(|e| format!("Failed reading .a2r recipe '{recipe_path}': {e}"))?;
+                if bytes.len() > MAX_RECIPE_BYTES {
+                    return Err(format!(
+                        ".a2r recipe '{recipe_path}' exceeds maximum allowed size ({} MiB).",
+                        MAX_RECIPE_BYTES / (1024 * 1024)
+                    ));
+                }
                 let (job, warnings) = parse_recipe(&bytes).map_err(|e| e.to_string())?;
                 let findings = validate_job(&job);
                 return Ok(json!({
@@ -356,7 +377,8 @@ pub fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             serde_json::to_value(report).map_err(|e| e.to_string())
         }
         "android2rust_dry_run" => {
-            let job = resolve_job_from_args(args)?.with_dry_run();
+            let mut job = resolve_job_from_args(args)?.with_dry_run();
+            merge_forensic_args(&mut job, args);
             let errors: Vec<_> = validate_job(&job)
                 .into_iter()
                 .filter(|f| f.severity == ValidationSeverity::Error)
@@ -371,7 +393,8 @@ pub fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             serde_json::to_value(res).map_err(|e| e.to_string())
         }
         "android2rust_run" => {
-            let job = resolve_job_from_args(args)?;
+            let mut job = resolve_job_from_args(args)?;
+            merge_forensic_args(&mut job, args);
             let errors: Vec<_> = validate_job(&job)
                 .into_iter()
                 .filter(|f| f.severity == ValidationSeverity::Error)
@@ -402,14 +425,19 @@ pub fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
                 parse_log_file_with_options(Path::new(log_path), opts).map_err(|e| e.to_string())?
             } else {
                 let mut job = resolve_job_from_args(args)?;
-                if !opts.case_meta.is_empty() {
-                    job.forensic_opts.case_meta = opts.case_meta;
-                }
-                if opts.ab_password.is_some() {
-                    job.forensic_opts.ab_password = opts.ab_password;
-                }
+                merge_forensic_args(&mut job, args);
                 if job.operation != AndroidOperation::InspectArtifact {
                     job = job.with_dry_run();
+                }
+                let errors: Vec<_> = validate_job(&job)
+                    .into_iter()
+                    .filter(|f| f.severity == ValidationSeverity::Error)
+                    .collect();
+                if !errors.is_empty() {
+                    return Err(format!(
+                        "Job validation errors prevented report generation: {}",
+                        serde_json::to_string(&errors).unwrap_or_default()
+                    ));
                 }
                 run_job_blocking(&job, None, &CancelToken::new()).map_err(|e| e.to_string())?
             };
@@ -450,6 +478,26 @@ fn forensic_opts_from_args(args: &Value) -> ForensicOptions {
         .filter(|s| !s.is_empty())
         .or_else(|| std::env::var("ANDROID2RUST_AB_PASSWORD").ok().filter(|s| !s.is_empty()));
     opts
+}
+
+fn merge_forensic_args(job: &mut AndroidJob, args: &Value) {
+    if let Some(cid) = args["case_id"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        job.forensic_opts.case_meta.case_id = Some(cid.to_string());
+    }
+    if let Some(eid) = args["evidence_id"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        job.forensic_opts.case_meta.evidence_id = Some(eid.to_string());
+    }
+    if let Some(ex) = args["examiner"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        job.forensic_opts.case_meta.examiner = Some(ex.to_string());
+    }
+    if let Some(pw) = args["ab_password"]
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("ANDROID2RUST_AB_PASSWORD").ok().filter(|s| !s.is_empty()))
+    {
+        job.forensic_opts.ab_password = Some(pw);
+    }
 }
 
 pub fn handle_jsonrpc_request(req: &Value) -> Option<Value> {
@@ -683,5 +731,45 @@ mod tests {
             "fastboot --slot b flash init_boot init_boot.img"
         );
         assert_eq!(parsed["destructive"], true);
+    }
+
+    #[test]
+    fn mcp_dry_run_forwards_provenance_and_report_validates_jobs() {
+        let tmp = TempDir::new().unwrap();
+        let resp = handle_jsonrpc_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "android2rust_dry_run",
+                "arguments": {
+                    "op": "devices",
+                    "case_id": "CASE-DRY-7",
+                    "evidence_id": "EV-7",
+                    "examiner": "Audit Bot"
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(resp["result"]["isError"], false);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let dry_val: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(dry_val["case_meta"]["case_id"], "CASE-DRY-7");
+
+        // android2rust_report rejects invalid job lacking required target
+        let invalid_rep = handle_jsonrpc_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "android2rust_report",
+                "arguments": {
+                    "op": "install",
+                    "output": tmp.path().join("bad.html").display().to_string()
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(invalid_rep["result"]["isError"], true);
     }
 }

@@ -1,7 +1,7 @@
 use crate::env::{find_adb_executable, find_fastboot_executable};
 use crate::output_parser::{AndroidOutputParser, FileActionKind, FileActionRecord, ParsedLineOutcome, RunSummary};
 use android2rust_core::{
-    AndroidJob, AndroidOperation, CaseMetadata, ForensicReport, StatusCodeInfo, ToolFamily, build_args,
+    AndroidJob, AndroidOperation, CaseMetadata, ForensicReport, StatusCodeInfo, StatusSeverity, ToolFamily, build_args,
     decode_exit_code, decode_status_code, format_command_line, inspect_artifact, validate_job,
 };
 use anyhow::{Context, Result, anyhow};
@@ -111,6 +111,37 @@ pub fn spawn_job_runner(job: AndroidJob, binary_override: Option<PathBuf>) -> (R
                 hasher512.update(err_msg.as_bytes());
                 let digest512 = android2rust_core::format::encode_hex_lower(&hasher512.finalize());
                 let (_, args) = build_args(&job);
+                let is_forensics =
+                    job.operation == AndroidOperation::InspectArtifact || job.tool == ToolFamily::Forensics;
+                let (exit_code, status_info) = if is_forensics {
+                    (
+                        1,
+                        StatusCodeInfo {
+                            code: "1".to_string(),
+                            exit_code: Some(1),
+                            severity: StatusSeverity::Error,
+                            is_success: false,
+                            short_label: "1 (Forensic Inspection Error)".to_string(),
+                            summary: err_msg.clone(),
+                            details: vec![err_msg.clone()],
+                        },
+                    )
+                } else if err_msg.contains("was not found on PATH") || err_msg.starts_with("Failed to launch ") {
+                    (127, decode_exit_code(127))
+                } else {
+                    (
+                        1,
+                        StatusCodeInfo {
+                            code: "1".to_string(),
+                            exit_code: Some(1),
+                            severity: StatusSeverity::Error,
+                            is_success: false,
+                            short_label: "1 (Execution Error)".to_string(),
+                            summary: err_msg.clone(),
+                            details: vec![err_msg.clone()],
+                        },
+                    )
+                };
                 let fallback = RunResult {
                     job_name: job.name.clone(),
                     tool: job.tool,
@@ -123,8 +154,8 @@ pub fn spawn_job_runner(job: AndroidJob, binary_override: Option<PathBuf>) -> (R
                     started_at: now.clone(),
                     ended_at: now,
                     duration_secs: 0.0,
-                    exit_code: 127,
-                    status_info: decode_exit_code(127),
+                    exit_code,
+                    status_info,
                     cancelled: cancel_worker.is_cancelled(),
                     summary: RunSummary {
                         errors_seen: 1,
@@ -221,6 +252,10 @@ fn execute_job_internal(
     });
     drop(line_tx);
 
+    const MAX_LIVE_LOG_LINES: usize = 200_000;
+    const MAX_LIVE_FILE_ACTIONS: usize = 200_000;
+    const MAX_LIVE_ERRORS: usize = 10_000;
+
     let mut parser = AndroidOutputParser::new();
     let mut file_actions = Vec::new();
     let mut errors = Vec::new();
@@ -249,18 +284,29 @@ fn execute_job_internal(
                         });
                     }
                     ParsedLineOutcome::Record(rec) => {
-                        log_lines.push(line);
-                        file_actions.push(rec.clone());
+                        if log_lines.len() < MAX_LIVE_LOG_LINES {
+                            log_lines.push(line);
+                        }
+                        if file_actions.len() < MAX_LIVE_FILE_ACTIONS {
+                            file_actions.push(rec.clone());
+                        }
                         emit(RunnerEvent::FileAction(rec));
                         emit(RunnerEvent::Summary(parser.summary.clone()));
                     }
                     ParsedLineOutcome::Error(err_txt) => {
-                        errors.push(err_txt.clone());
-                        log_lines.push(format!("[stderr] {line}"));
+                        if errors.len() < MAX_LIVE_ERRORS {
+                            errors.push(err_txt.clone());
+                        }
+                        if log_lines.len() < MAX_LIVE_LOG_LINES {
+                            log_lines.push(format!("[stderr] {line}"));
+                        }
                         emit(RunnerEvent::Error(err_txt));
+                        emit(RunnerEvent::Summary(parser.summary.clone()));
                     }
                     _ => {
-                        log_lines.push(format!("[stderr] {line}"));
+                        if log_lines.len() < MAX_LIVE_LOG_LINES {
+                            log_lines.push(format!("[stderr] {line}"));
+                        }
                         emit(RunnerEvent::LogLine(line));
                     }
                 }
@@ -277,19 +323,29 @@ fn execute_job_internal(
                 });
             }
             ParsedLineOutcome::Record(rec) => {
-                log_lines.push(line);
-                file_actions.push(rec.clone());
+                if log_lines.len() < MAX_LIVE_LOG_LINES {
+                    log_lines.push(line);
+                }
+                if file_actions.len() < MAX_LIVE_FILE_ACTIONS {
+                    file_actions.push(rec.clone());
+                }
                 emit(RunnerEvent::FileAction(rec));
                 emit(RunnerEvent::Summary(parser.summary.clone()));
             }
             ParsedLineOutcome::Error(err_txt) => {
-                log_lines.push(line);
-                errors.push(err_txt.clone());
+                if log_lines.len() < MAX_LIVE_LOG_LINES {
+                    log_lines.push(line);
+                }
+                if errors.len() < MAX_LIVE_ERRORS {
+                    errors.push(err_txt.clone());
+                }
                 emit(RunnerEvent::Error(err_txt));
                 emit(RunnerEvent::Summary(parser.summary.clone()));
             }
             _ => {
-                log_lines.push(line.clone());
+                if log_lines.len() < MAX_LIVE_LOG_LINES {
+                    log_lines.push(line.clone());
+                }
                 emit(RunnerEvent::LogLine(line));
             }
         }
@@ -312,18 +368,19 @@ fn execute_job_internal(
 
     let cancelled = cancel.is_cancelled();
     let exit_code = if cancelled { -1 } else { status.code().unwrap_or(1) };
-    let allow_token_override = exit_code != 0
-        || matches!(
-            job.operation,
-            AndroidOperation::InstallApk
-                | AndroidOperation::UninstallPackage
-                | AndroidOperation::Sideload
-                | AndroidOperation::FastbootFlash
-                | AndroidOperation::FastbootErase
-                | AndroidOperation::FastbootFormat
-                | AndroidOperation::FastbootFlashingUnlock
-                | AndroidOperation::FastbootFlashingLock
-        );
+    let allow_token_override = !cancelled
+        && (exit_code != 0
+            || matches!(
+                job.operation,
+                AndroidOperation::InstallApk
+                    | AndroidOperation::UninstallPackage
+                    | AndroidOperation::Sideload
+                    | AndroidOperation::FastbootFlash
+                    | AndroidOperation::FastbootErase
+                    | AndroidOperation::FastbootFormat
+                    | AndroidOperation::FastbootFlashingUnlock
+                    | AndroidOperation::FastbootFlashingLock
+            ));
     let status_info = if allow_token_override && let Some(tok) = parser.detected_status_tokens.first() {
         let mut decoded = decode_status_code(tok);
         decoded.exit_code = Some(exit_code);
@@ -602,6 +659,7 @@ fn build_process_command(binary: &Path, args: &[String]) -> Command {
 }
 
 fn stream_lines<R: Read>(reader: R, is_err: bool, tx: mpsc::Sender<(bool, String)>) {
+    const MAX_STREAM_LINE_BYTES: usize = 1024 * 1024;
     let mut buf_reader = BufReader::new(reader);
     let mut chunk = [0u8; 4096];
     let mut line_buf: Vec<u8> = Vec::with_capacity(512);
@@ -628,7 +686,9 @@ fn stream_lines<R: Read>(reader: R, is_err: bool, tx: mpsc::Sender<(bool, String
                         let _ = tx.send((is_err, s));
                     } else {
                         last_was_cr = false;
-                        line_buf.push(b);
+                        if line_buf.len() < MAX_STREAM_LINE_BYTES {
+                            line_buf.push(b);
+                        }
                     }
                 }
             }
@@ -680,5 +740,24 @@ mod tests {
         let dry_res = run_job_blocking(&dry, None, &CancelToken::new()).unwrap();
         assert!(dry_res.dry_run);
         assert_eq!(dry_res.exit_code, 0);
+
+        // Missing forensic file via spawn_job_runner yields exit_code 1 (not 127)
+        let missing_job = AndroidJob {
+            name: "Missing Artifact".to_string(),
+            tool: ToolFamily::Forensics,
+            operation: AndroidOperation::InspectArtifact,
+            source_path: tmp.path().join("nonexistent.apk").display().to_string(),
+            ..Default::default()
+        };
+        let (rx, _cancel) = spawn_job_runner(missing_job, None);
+        let mut finished = None;
+        for ev in rx {
+            if let RunnerEvent::Finished(r) = ev {
+                finished = Some(*r);
+            }
+        }
+        let err_res = finished.unwrap();
+        assert_eq!(err_res.exit_code, 1);
+        assert!(err_res.status_info.short_label.contains("Forensic Inspection Error"));
     }
 }

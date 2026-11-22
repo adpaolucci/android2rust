@@ -3,7 +3,8 @@ use android2rust_runner::RunResult;
 use anyhow::Result;
 
 fn normalize_telemetry_ts(ts: &str) -> String {
-    let b = ts.as_bytes();
+    let s = ts.trim();
+    let b = s.as_bytes();
     if b.len() >= 19
         && b[0..4].iter().all(u8::is_ascii_digit)
         && b[4] == b'-'
@@ -17,10 +18,15 @@ fn normalize_telemetry_ts(ts: &str) -> String {
         && b[16] == b':'
         && b[17..19].iter().all(u8::is_ascii_digit)
     {
-        format!("{}Z", ts.replacen(' ', "T", 1))
+        s.replacen(' ', "T", 1)
     } else {
-        ts.to_string()
+        s.to_string()
     }
+}
+
+fn has_leading_year(ts: &str) -> bool {
+    let b = ts.as_bytes();
+    b.len() >= 5 && b[0..4].iter().all(u8::is_ascii_digit) && b[4] == b'-'
 }
 
 pub fn collect_timeline_events(result: &RunResult) -> Vec<TimelineEvent> {
@@ -40,8 +46,9 @@ pub fn collect_timeline_events(result: &RunResult) -> Vec<TimelineEvent> {
         }
     }
     events.sort_by(|a, b| {
-        a.timestamp
-            .cmp(&b.timestamp)
+        has_leading_year(&b.timestamp)
+            .cmp(&has_leading_year(&a.timestamp))
+            .then_with(|| a.timestamp.cmp(&b.timestamp))
             .then_with(|| a.source.cmp(&b.source))
             .then_with(|| a.category.cmp(&b.category))
             .then_with(|| a.target.cmp(&b.target))
@@ -52,10 +59,17 @@ pub fn collect_timeline_events(result: &RunResult) -> Vec<TimelineEvent> {
 }
 
 fn csv_cell(raw: &str) -> String {
-    if raw.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", raw.replace('"', "\"\""))
+    let neutralized = if raw.starts_with(['=', '+', '-', '@', '\t', '\r'])
+        || raw.trim_start_matches(' ').starts_with(['=', '+', '-', '@'])
+    {
+        format!("'{raw}")
     } else {
         raw.to_string()
+    };
+    if neutralized.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", neutralized.replace('"', "\"\""))
+    } else {
+        neutralized
     }
 }
 

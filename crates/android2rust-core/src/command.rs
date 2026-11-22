@@ -135,6 +135,39 @@ pub fn build_args(job: &AndroidJob) -> (String, Vec<String>) {
                 args.push("--report".to_string());
                 args.push(job.target_path.trim().to_string());
             }
+            if let Some(cid) = job
+                .forensic_opts
+                .case_meta
+                .case_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args.push("--case-id".to_string());
+                args.push(cid.to_string());
+            }
+            if let Some(eid) = job
+                .forensic_opts
+                .case_meta
+                .evidence_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args.push("--evidence-id".to_string());
+                args.push(eid.to_string());
+            }
+            if let Some(ex) = job
+                .forensic_opts
+                .case_meta
+                .examiner
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args.push("--examiner".to_string());
+                args.push(ex.to_string());
+            }
             for extra in &job.extra_args {
                 let t = extra.trim();
                 if !t.is_empty() {
@@ -241,6 +274,10 @@ fn build_adb_subargs(job: &AndroidJob, args: &mut Vec<String>) {
             args.push("shell".to_string());
             args.push("pm".to_string());
             args.push("enable".to_string());
+            if let Some(u) = job.package_opts.user_id {
+                args.push("--user".to_string());
+                args.push(u.to_string());
+            }
             if !job.target_path.trim().is_empty() {
                 args.push(job.target_path.trim().to_string());
             }
@@ -390,22 +427,39 @@ fn build_adb_subargs(job: &AndroidJob, args: &mut Vec<String>) {
 }
 
 fn build_fastboot_subargs(job: &AndroidJob, args: &mut Vec<String>) {
-    if job.fastboot_opts.skip_reboot {
+    if job.fastboot_opts.skip_reboot
+        && matches!(
+            job.operation,
+            AndroidOperation::FastbootFlash | AndroidOperation::FastbootErase | AndroidOperation::FastbootFormat
+        )
+    {
         args.push("--skip-reboot".to_string());
     }
-    if job.fastboot_opts.disable_verity {
+    if job.fastboot_opts.disable_verity && job.operation == AndroidOperation::FastbootFlash {
         args.push("--disable-verity".to_string());
     }
-    if job.fastboot_opts.disable_verification {
+    if job.fastboot_opts.disable_verification && job.operation == AndroidOperation::FastbootFlash {
         args.push("--disable-verification".to_string());
     }
     if let Some(slot) = &job.fastboot_opts.slot
         && !slot.trim().is_empty()
+        && matches!(
+            job.operation,
+            AndroidOperation::FastbootFlash
+                | AndroidOperation::FastbootErase
+                | AndroidOperation::FastbootFormat
+                | AndroidOperation::FastbootGetvar
+        )
     {
         args.push("--slot".to_string());
         args.push(slot.trim().to_string());
     }
-    if job.fastboot_opts.wipe_userdata {
+    if job.fastboot_opts.wipe_userdata
+        && matches!(
+            job.operation,
+            AndroidOperation::FastbootFlash | AndroidOperation::FastbootErase | AndroidOperation::FastbootFormat
+        )
+    {
         args.push("-w".to_string());
     }
 
@@ -480,27 +534,55 @@ fn build_fastboot_subargs(job: &AndroidJob, args: &mut Vec<String>) {
     }
 }
 
+fn sanitize_single_line(s: &str) -> String {
+    s.replace(['\r', '\n'], " ")
+}
+
+fn escape_batch_percent(s: &str) -> String {
+    sanitize_single_line(s).replace('%', "%%")
+}
+
+fn escape_batch_echo(s: &str) -> String {
+    let clean = sanitize_single_line(s);
+    let mut out = String::with_capacity(clean.len() + 8);
+    for ch in clean.chars() {
+        match ch {
+            '^' => out.push_str("^^"),
+            '%' => out.push_str("%%"),
+            '&' => out.push_str("^&"),
+            '|' => out.push_str("^|"),
+            '<' => out.push_str("^<"),
+            '>' => out.push_str("^>"),
+            '(' => out.push_str("^("),
+            ')' => out.push_str("^)"),
+            '"' => out.push_str("^\""),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 pub fn format_command_line(job: &AndroidJob) -> String {
     let (bin, args) = build_args(job);
     let mut parts = Vec::with_capacity(args.len() + 1);
     parts.push(bin);
     for a in args {
-        parts.push(quote_windows_arg(&a));
+        parts.push(quote_windows_arg(&sanitize_single_line(&a)));
     }
     parts.join(" ")
 }
 
 pub fn build_batch_script(job: &AndroidJob) -> String {
     let cmd_line = format_command_line(job);
+    let exec_cmd = escape_batch_percent(&cmd_line);
+    let echo_cmd = escape_batch_echo(&cmd_line);
+    let safe_name = sanitize_single_line(&job.name);
     let mut out = String::new();
     out.push_str("@echo off\r\n");
     out.push_str("setlocal EnableExtensions\r\n");
-    out.push_str(&format!(
-        "rem Generated by android2rust — {}\r\n",
-        job.name.replace(['\r', '\n'], " ")
-    ));
-    out.push_str(&format!("echo Running: {cmd_line}\r\n"));
-    out.push_str(&format!("{cmd_line}\r\n"));
+    out.push_str(&format!("rem Generated by android2rust — {safe_name}\r\n"));
+    out.push_str(&format!("echo Running: {echo_cmd}\r\n"));
+    out.push_str(&format!("{exec_cmd}\r\n"));
     out.push_str("set EXITCODE=%ERRORLEVEL%\r\n");
     out.push_str("echo Android2Rust exit code: %EXITCODE%\r\n");
     out.push_str("exit /b %EXITCODE%\r\n");
@@ -509,11 +591,15 @@ pub fn build_batch_script(job: &AndroidJob) -> String {
 
 pub fn build_powershell_script(job: &AndroidJob) -> String {
     let (bin, args) = build_args(job);
-    let ps_args: Vec<String> = args.iter().map(|a| format!("'{}'", a.replace('\'', "''"))).collect();
+    let ps_args: Vec<String> = args
+        .iter()
+        .map(|a| format!("'{}'", sanitize_single_line(a).replace('\'', "''")))
+        .collect();
+    let safe_name = sanitize_single_line(&job.name).replace('\'', "''");
     let mut out = String::new();
     out.push_str("# Generated by android2rust\n");
     out.push_str("$ErrorActionPreference = 'Stop'\n");
-    out.push_str(&format!("$JobName = '{}'\n", job.name.replace('\'', "''")));
+    out.push_str(&format!("$JobName = '{safe_name}'\n"));
     out.push_str(&format!("$Tool = '{bin}'\n"));
     out.push_str(&format!("$ArgsList = @({})\n", ps_args.join(", ")));
     out.push_str("Write-Host \"[$JobName] Executing: $Tool $($ArgsList -join ' ')\"\n");
@@ -626,5 +712,49 @@ mod tests {
         fb.fastboot_opts.partition = "boot".to_string();
         fb.fastboot_opts.slot = Some("a".to_string());
         assert_eq!(format_command_line(&fb), "fastboot --slot a flash boot boot.img");
+    }
+
+    #[test]
+    fn escapes_batch_scripts_and_gates_fastboot_and_forensic_args() {
+        let mut inspect = AndroidJob {
+            operation: AndroidOperation::InspectArtifact,
+            tool: ToolFamily::Forensics,
+            source_path: r"C:\Evidence\backup%1.ab".to_string(),
+            target_path: r"C:\Out\audit & report.html".to_string(),
+            ..Default::default()
+        };
+        inspect.forensic_opts.case_meta.case_id = Some("IR-2026".to_string());
+        inspect.forensic_opts.case_meta.examiner = Some("J. Doe".to_string());
+        inspect.forensic_opts.ab_password = Some("top-secret-never-printed".to_string());
+
+        let cmd = format_command_line(&inspect);
+        assert!(cmd.contains("--case-id IR-2026"));
+        assert!(cmd.contains("--examiner \"J. Doe\""));
+        assert!(!cmd.contains("top-secret-never-printed"));
+
+        let bat = build_batch_script(&inspect);
+        assert!(bat.contains("%%1"));
+        assert!(bat.contains("echo Running: android2rust inspect ^\"C:\\Evidence\\backup%%1.ab^\" --report ^\"C:\\Out\\audit ^& report.html^\""));
+
+        let mut fb_devs = AndroidJob {
+            operation: AndroidOperation::FastbootDevices,
+            tool: ToolFamily::Fastboot,
+            ..Default::default()
+        };
+        fb_devs.fastboot_opts.wipe_userdata = true;
+        fb_devs.fastboot_opts.slot = Some("a".to_string());
+        assert_eq!(format_command_line(&fb_devs), "fastboot devices");
+
+        let mut enable = AndroidJob {
+            operation: AndroidOperation::EnablePackage,
+            tool: ToolFamily::Adb,
+            target_path: "com.example.demo".to_string(),
+            ..Default::default()
+        };
+        enable.package_opts.user_id = Some(10);
+        assert_eq!(
+            format_command_line(&enable),
+            "adb shell pm enable --user 10 com.example.demo"
+        );
     }
 }

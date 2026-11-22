@@ -167,6 +167,41 @@ pub fn render_html(result: &RunResult) -> String {
         )
     };
 
+    let timeline_events = crate::timeline::collect_timeline_events(result);
+    let timeline_card = if timeline_events.is_empty() {
+        String::new()
+    } else {
+        const MAX_HTML_TIMELINE: usize = 500;
+        let total = timeline_events.len();
+        let tl_rows: String = timeline_events
+            .iter()
+            .take(MAX_HTML_TIMELINE)
+            .map(|ev| {
+                format!(
+                    "<tr><td class=\"mono\">{}</td><td><span class=\"tag\">{}</span></td><td>{}</td><td class=\"mono\">{}</td><td>{}</td></tr>",
+                    esc(&ev.timestamp),
+                    esc(&ev.source),
+                    esc(&ev.category),
+                    esc(&ev.target),
+                    esc(&ev.detail)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cap_note = if total > MAX_HTML_TIMELINE {
+            format!(
+                "<p class=\"muted\">Showing first {MAX_HTML_TIMELINE} of {total} timeline events (export Timeline CSV/JSONL for full sequence).</p>"
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "<div class=\"card\"><h2 style=\"margin:0 0 8px 0;font-size:15px;\">Chronological Timeline ({total})</h2>{cap_note}\
+             <table><thead><tr><th>Timestamp</th><th>Source</th><th>Category</th><th>Target</th><th>Detail</th></tr></thead>\
+             <tbody>{tl_rows}</tbody></table></div>"
+        )
+    };
+
     format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -250,6 +285,8 @@ pub fn render_html(result: &RunResult) -> String {
 
   {forensic_card}
 
+  {timeline_card}
+
   <div class="card">
     <h2 style="margin:0 0 8px 0;font-size:15px;">Errors ({error_count})</h2>
     {error_section}
@@ -308,6 +345,7 @@ function filterRows() {{
         error_section = error_section,
         action_count = result.file_actions.len(),
         action_rows = action_rows,
+        timeline_card = timeline_card,
         sha256 = esc(&result.log_sha256),
     )
 }

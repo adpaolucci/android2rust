@@ -17,6 +17,6 @@ ReleaseDate: 2026-11-19
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/adpaolucci/android2rust/releases/download/v0.1.0/android2rust-x86_64-pc-windows-msvc.zip
-    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    InstallerSha256: BCA3758BCF9ACFA4A73821763356191159C27845EDD1D09F8823EE0E877C5F89
 ManifestType: installer
 ManifestVersion: 1.9.0

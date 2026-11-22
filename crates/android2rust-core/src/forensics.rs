@@ -765,7 +765,7 @@ fn inspect_apk_zip_bytes(
             timeline_cap -= 1;
         }
 
-        if opts.extract_manifest_permissions && ze.name == "AndroidManifest.xml" {
+        if ze.name == "AndroidManifest.xml" {
             if let Some((manifest_bytes, truncated)) = extract_zip_entry_bytes(bytes, ze) {
                 if truncated {
                     warnings.push(format!(
@@ -775,9 +775,11 @@ fn inspect_apk_zip_bytes(
                 }
                 let sec = axml::parse_manifest_security(&manifest_bytes);
                 axml::append_manifest_security(&sec, &mut manifest_meta, &mut warnings);
-                permissions.extend(sec.permissions);
-                for perm in scan_android_permissions(&manifest_bytes) {
-                    permissions.insert(perm);
+                if opts.extract_manifest_permissions {
+                    permissions.extend(sec.permissions);
+                    for perm in scan_android_permissions(&manifest_bytes) {
+                        permissions.insert(perm);
+                    }
                 }
             } else {
                 warnings
@@ -1303,6 +1305,22 @@ fn inspect_sqlite_bytes(
     }
 }
 
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 fn scan_sqlite_schema_tables(bytes: &[u8]) -> (bool, Vec<String>, Vec<ForensicEntry>) {
     let wal_mode = bytes.len() >= 20 && (bytes[18] == 2 || bytes[19] == 2);
     let mut tables = BTreeSet::new();
@@ -1314,14 +1332,18 @@ fn scan_sqlite_schema_tables(bytes: &[u8]) -> (bool, Vec<String>, Vec<ForensicEn
         while let Some(found) = upper[idx..].find(stmt_prefix) {
             let start = idx + found;
             let trimmed_after = lossy[start + stmt_prefix.len()..].trim_start();
-            let after = if trimmed_after.len() >= 14 && trimmed_after[..14].eq_ignore_ascii_case("IF NOT EXISTS ") {
+            let after = if trimmed_after
+                .as_bytes()
+                .get(..14)
+                .is_some_and(|b| b.eq_ignore_ascii_case(b"IF NOT EXISTS "))
+            {
                 trimmed_after[14..].trim_start()
             } else {
                 trimmed_after
             };
             let name_end = after
                 .find(|c: char| c.is_whitespace() || c == '(')
-                .unwrap_or(after.len().min(80));
+                .unwrap_or_else(|| floor_char_boundary(after, after.len().min(80)));
             let raw_tbl = after[..name_end].trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']');
             let tbl = raw_tbl
                 .strip_prefix("main.")
@@ -1330,10 +1352,11 @@ fn scan_sqlite_schema_tables(bytes: &[u8]) -> (bool, Vec<String>, Vec<ForensicEn
                 .trim_matches(|c| c == '"' || c == '`' || c == '[' || c == ']');
             if !tbl.is_empty() && tbl.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                 tables.insert(tbl.to_string());
+                let fallback_end = floor_char_boundary(&lossy, (start + 120).min(lossy.len()));
                 let stmt_end = lossy[start..]
                     .find(')')
-                    .map(|p| (start + p + 1).min(start + 220))
-                    .unwrap_or((start + 120).min(lossy.len()));
+                    .map(|p| floor_char_boundary(&lossy, (start + p + 1).min(start + 220).min(lossy.len())))
+                    .unwrap_or(fallback_end);
                 let snippet = lossy[start..stmt_end].replace(['\r', '\n'], " ");
                 entries.push(ForensicEntry {
                     category: "SQLite Schema".to_string(),
@@ -1343,7 +1366,7 @@ fn scan_sqlite_schema_tables(bytes: &[u8]) -> (bool, Vec<String>, Vec<ForensicEn
                 });
             }
             let after_start = lossy.len() - after.len();
-            idx = (after_start + name_end.max(1)).min(lossy.len());
+            idx = ceil_char_boundary(&lossy, (after_start + name_end.max(1)).min(lossy.len()));
         }
     }
     (wal_mode, tables.into_iter().collect(), entries)
@@ -1459,7 +1482,7 @@ pub(super) fn extract_xml_attr(line: &str, attr: &str) -> Option<String> {
 
 fn parse_logcat_timestamp(line: &str) -> Option<String> {
     let b = line.as_bytes();
-    if b.len() >= 23
+    if b.len() >= 21
         && b[0..4].iter().all(u8::is_ascii_digit)
         && b[4] == b'-'
         && b[5..7].iter().all(u8::is_ascii_digit)
@@ -1472,8 +1495,23 @@ fn parse_logcat_timestamp(line: &str) -> Option<String> {
         && b[16] == b':'
         && b[17..19].iter().all(u8::is_ascii_digit)
         && b[19] == b'.'
+        && b[20].is_ascii_digit()
     {
-        return Some(format!("{}Z", line[..19].replacen(' ', "T", 1)));
+        let mut end = 20;
+        while end < b.len() && b[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end < b.len() && b[end] == b'Z' {
+            end += 1;
+        } else if end + 6 <= b.len()
+            && matches!(b[end], b'+' | b'-')
+            && b[end + 1..end + 3].iter().all(u8::is_ascii_digit)
+            && b[end + 3] == b':'
+            && b[end + 4..end + 6].iter().all(u8::is_ascii_digit)
+        {
+            end += 6;
+        }
+        return Some(line[..end].replacen(' ', "T", 1));
     }
     if b.len() >= 18
         && b[0..2].iter().all(u8::is_ascii_digit)
@@ -1486,8 +1524,13 @@ fn parse_logcat_timestamp(line: &str) -> Option<String> {
         && b[11] == b':'
         && b[12..14].iter().all(u8::is_ascii_digit)
         && b[14] == b'.'
+        && b[15..18].iter().all(u8::is_ascii_digit)
     {
-        return Some(line[..18].to_string());
+        let mut end = 18;
+        while end < b.len() && b[end].is_ascii_digit() {
+            end += 1;
+        }
+        return Some(line[..end].to_string());
     }
     None
 }
@@ -1545,7 +1588,7 @@ fn inspect_text_dump_bytes(
             if entries.len() < opts.max_entries {
                 entries.push(ForensicEntry {
                     category: "Logcat Error".to_string(),
-                    name: format!("Line {}", entries.len() + 1),
+                    name: format!("Line {}", line_idx + 1),
                     detail: t.to_string(),
                     size_bytes: None,
                 });
@@ -2134,7 +2177,7 @@ DUMP OF SERVICE battery:
         assert!(rep.warnings.iter().any(|w| w.contains("tombstone")));
         assert!(rep.timeline.iter().any(|t| t.source == "UsageStats"
             && t.target == "com.demo.messenger"
-            && t.timestamp == "2025-02-01T10:14:00Z"));
+            && t.timestamp == "2025-02-01T10:14:00"));
     }
 
     #[test]
@@ -2287,5 +2330,89 @@ DUMP OF SERVICE battery:
             ),
             Some("android.permission.CAMERA".to_string())
         );
+    }
+
+    #[test]
+    fn malformed_sqlite_and_logcat_utf8_boundaries_do_not_panic() {
+        let tmp = TempDir::new().unwrap();
+
+        // Binary SQLite with non-UTF8 (0xFF -> U+FFFD) bytes inside CREATE TABLE payloads
+        let mut sqlite = vec![0u8; 4096];
+        sqlite[..16].copy_from_slice(b"SQLite format 3\0");
+        sqlite[16..18].copy_from_slice(&4096u16.to_be_bytes());
+        sqlite[56..60].copy_from_slice(&1u32.to_be_bytes());
+        let p1 = b"CREATE TABLE ";
+        sqlite[120..120 + p1.len()].copy_from_slice(p1);
+        sqlite[120 + p1.len()..120 + p1.len() + 6].fill(0xFF);
+        let p2 = b"CREATE TABLE long_tbl(";
+        sqlite[200..200 + p2.len()].copy_from_slice(p2);
+        sqlite[200 + p2.len()..460].fill(0xFE);
+        let db_path = tmp.path().join("fuzzed.db");
+        std::fs::write(&db_path, &sqlite).unwrap();
+        let db_rep = inspect_artifact(&db_path, &ForensicOptions::default()).unwrap();
+        assert_eq!(db_rep.kind, ArtifactKind::SqliteDatabase);
+
+        // Logcat timestamp with multibyte UTF-8 immediately after dot must not panic
+        assert_eq!(parse_logcat_timestamp("01-02 03:04:05.\u{00E9}\u{00E9}"), None);
+        assert_eq!(
+            parse_logcat_timestamp("2025-05-01 09:00:00.123456  1000  1001 E Tag: msg"),
+            Some("2025-05-01T09:00:00.123456".to_string())
+        );
+
+        // Error line number reflects actual file line index (line 3)
+        let log_path = tmp.path().join("lines.log");
+        std::fs::write(
+            &log_path,
+            "info one\ninfo two\n11-19 12:00:01.123  1000  1001 E Tag: boom\n",
+        )
+        .unwrap();
+        let log_rep = inspect_artifact(&log_path, &ForensicOptions::default()).unwrap();
+        assert!(log_rep.entries.iter().any(|e| e.name == "Line 3"));
+    }
+
+    #[test]
+    fn manifest_detects_test_only_network_config_exported_and_caps_abx_timeline() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = br#"<manifest package="com.sec.test">
+            <application android:testOnly="true" android:networkSecurityConfig="@xml/nsc">
+                <activity android:name=".Main" android:exported="true"/>
+                <service android:name=".Svc" android:exported="true"/>
+            </application>
+        </manifest>"#;
+        let xml_path = tmp.path().join("AndroidManifest.xml");
+        std::fs::write(&xml_path, manifest).unwrap();
+        let rep = inspect_artifact(&xml_path, &ForensicOptions::default()).unwrap();
+        assert!(rep.metadata.contains(&("Test Only".to_string(), "true".to_string())));
+        assert!(
+            rep.metadata
+                .contains(&("Network Security Config".to_string(), "Configured".to_string()))
+        );
+        assert!(
+            rep.metadata
+                .contains(&("Exported Components".to_string(), "2".to_string()))
+        );
+        assert!(rep.warnings.iter().any(|w| w.contains("testOnly=\"true\"")));
+
+        // ABX timeline is bounded by max_entries
+        let mut abx = b"ABX\0".to_vec();
+        abx.push(0x00);
+        abx.push(0x32);
+        push_abx_new_interned(&mut abx, "root");
+        for i in 0..20 {
+            abx.push(0x8F);
+            push_abx_new_interned(&mut abx, &format!("ts{i}"));
+            abx.extend_from_slice(&(1_700_000_000_000i64 + i).to_be_bytes());
+        }
+        abx.push(0x33);
+        abx.extend_from_slice(&0u16.to_be_bytes());
+        abx.push(0x01);
+        let abx_path = tmp.path().join("many_ts.abx");
+        std::fs::write(&abx_path, &abx).unwrap();
+        let opts = ForensicOptions {
+            max_entries: 5,
+            ..Default::default()
+        };
+        let abx_rep = inspect_artifact(&abx_path, &opts).unwrap();
+        assert_eq!(abx_rep.timeline.len(), 5);
     }
 }

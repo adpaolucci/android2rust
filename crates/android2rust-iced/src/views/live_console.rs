@@ -13,6 +13,12 @@ pub fn view_live_console(app: &App) -> Element<'_, Message> {
             button(text("Export HTML...").size(12))
                 .on_press(Message::ExportReport(ReportFormat::Html))
                 .style(button::secondary),
+            button(text("Timeline CSV...").size(12))
+                .on_press(Message::ExportReport(ReportFormat::TimelineCsv))
+                .style(button::secondary),
+            button(text("Timeline JSONL...").size(12))
+                .on_press(Message::ExportReport(ReportFormat::TimelineJsonl))
+                .style(button::secondary),
             button(text("Export All (HTML+JSON+MD)...").size(12))
                 .on_press(Message::ExportReport(ReportFormat::All))
                 .style(button::secondary),

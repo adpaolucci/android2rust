@@ -491,9 +491,9 @@ impl AndroidJob {
         }
 
         if self.fastboot_opts.wipe_userdata
-            && !matches!(
+            && matches!(
                 self.operation,
-                AndroidOperation::FastbootFlashingUnlock | AndroidOperation::FastbootFlashingLock
+                AndroidOperation::FastbootFlash | AndroidOperation::FastbootErase | AndroidOperation::FastbootFormat
             )
         {
             reasons.push("fastboot -w (wipe userdata & cache)".to_string());
@@ -526,5 +526,11 @@ mod tests {
         job.operation = AndroidOperation::Shell;
         job.target_path = "pm clear com.example.app".to_string();
         assert!(job.is_destructive());
+
+        job.operation = AndroidOperation::Devices;
+        job.tool = ToolFamily::Adb;
+        job.target_path.clear();
+        job.fastboot_opts.wipe_userdata = true;
+        assert!(!job.is_destructive());
     }
 }

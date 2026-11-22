@@ -166,62 +166,23 @@ pub fn parse_log_file_with_options(path: &Path, opts: ForensicOptions) -> Result
     }
     drop(head_file);
 
-    let sig = &head[..head_len];
-    let is_binary_header = sig.starts_with(b"ANDROID BACKUP\n")
-        || sig.starts_with(b"ANDROID BACKUP\r\n")
-        || sig.starts_with(b"SQLite format 3\0")
-        || sig.starts_with(b"PK\x03\x04")
-        || sig.starts_with(b"PK\x05\x06")
-        || sig.starts_with(b"dex\n")
-        || sig.starts_with(b"ABX\0")
-        || (head_len >= 8 && sig.starts_with(&[0x03, 0x00, 0x08, 0x00]))
-        || !sig
-            .iter()
-            .all(|b| !b.is_ascii_control() || matches!(b, b'\n' | b'\r' | b'\t'));
-
-    if is_binary_header {
-        let job = AndroidJob {
-            name: path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Artifact Inspection")
-                .to_string(),
-            tool: ToolFamily::Forensics,
-            operation: AndroidOperation::InspectArtifact,
-            source_path: path.display().to_string(),
-            forensic_opts: opts,
-            ..Default::default()
-        };
-        return run_job_blocking(&job, None, &CancelToken::new());
-    }
-
     const MAX_LOG_LINES_IN_MEMORY: usize = 200_000;
+    const MAX_LOG_ERRORS_IN_MEMORY: usize = 10_000;
     const MAX_SINGLE_LINE_BYTES: u64 = 1024 * 1024;
-    let file = std::fs::File::open(path).with_context(|| format!("Failed to open log file {}", path.display()))?;
-    let mut reader = std::io::BufReader::new(file);
+    const MAX_UTF16_LOG_BYTES: usize = 64 * 1024 * 1024;
+
+    let sig = &head[..head_len];
+    let is_utf16_le = sig.starts_with(&[0xFF, 0xFE]);
+    let is_utf16_be = sig.starts_with(&[0xFE, 0xFF]);
+
     let mut parser = AndroidOutputParser::new();
     let mut file_actions = Vec::new();
     let mut errors = Vec::new();
     let mut log_lines = Vec::new();
     let mut hasher = Sha256::new();
     let mut hasher512 = Sha512::new();
-    let mut raw_line = Vec::with_capacity(512);
 
-    loop {
-        raw_line.clear();
-        let n = std::io::BufRead::read_until(
-            &mut std::io::Read::take(&mut reader, MAX_SINGLE_LINE_BYTES),
-            b'\n',
-            &mut raw_line,
-        )
-        .with_context(|| format!("Failed to read log file {}", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        while raw_line.last().is_some_and(|&b| b == b'\n' || b == b'\r') {
-            raw_line.pop();
-        }
-        let line = String::from_utf8_lossy(&raw_line).into_owned();
+    let mut ingest_line = |line: String| {
         hasher.update(line.as_bytes());
         hasher.update(b"\n");
         hasher512.update(line.as_bytes());
@@ -229,11 +190,88 @@ pub fn parse_log_file_with_options(path: &Path, opts: ForensicOptions) -> Result
         if log_lines.len() < MAX_LOG_LINES_IN_MEMORY {
             log_lines.push(line.clone());
         }
-
         match parser.feed_line(&line) {
-            ParsedLineOutcome::Record(rec) => file_actions.push(rec),
-            ParsedLineOutcome::Error(e) => errors.push(e),
+            ParsedLineOutcome::Record(rec) if file_actions.len() < MAX_LOG_LINES_IN_MEMORY => {
+                file_actions.push(rec);
+            }
+            ParsedLineOutcome::Error(e) if errors.len() < MAX_LOG_ERRORS_IN_MEMORY => {
+                errors.push(e);
+            }
             _ => {}
+        }
+    };
+
+    if is_utf16_le || is_utf16_be {
+        let file = std::fs::File::open(path).with_context(|| format!("Failed to open log file {}", path.display()))?;
+        let mut raw_bytes = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(file, MAX_UTF16_LOG_BYTES as u64),
+            &mut raw_bytes,
+        )
+        .with_context(|| format!("Failed to read UTF-16 log file {}", path.display()))?;
+        let payload = raw_bytes.get(2..).unwrap_or(&[]);
+        let mut units = Vec::with_capacity(payload.len() / 2);
+        for chunk in payload.as_chunks::<2>().0 {
+            let u = if is_utf16_le {
+                u16::from_le_bytes(*chunk)
+            } else {
+                u16::from_be_bytes(*chunk)
+            };
+            units.push(u);
+        }
+        let decoded = String::from_utf16_lossy(&units);
+        for line in decoded.lines() {
+            ingest_line(line.to_string());
+        }
+    } else {
+        let is_binary_header = sig.starts_with(b"ANDROID BACKUP\n")
+            || sig.starts_with(b"ANDROID BACKUP\r\n")
+            || sig.starts_with(b"SQLite format 3\0")
+            || sig.starts_with(b"PK\x03\x04")
+            || sig.starts_with(b"PK\x05\x06")
+            || sig.starts_with(b"dex\n")
+            || sig.starts_with(b"ABX\0")
+            || (head_len >= 8 && sig.starts_with(&[0x03, 0x00, 0x08, 0x00]))
+            || !sig
+                .iter()
+                .all(|b| !b.is_ascii_control() || matches!(b, b'\n' | b'\r' | b'\t'));
+
+        if is_binary_header {
+            let job = AndroidJob {
+                name: path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Artifact Inspection")
+                    .to_string(),
+                tool: ToolFamily::Forensics,
+                operation: AndroidOperation::InspectArtifact,
+                source_path: path.display().to_string(),
+                forensic_opts: opts,
+                ..Default::default()
+            };
+            return run_job_blocking(&job, None, &CancelToken::new());
+        }
+
+        let file = std::fs::File::open(path).with_context(|| format!("Failed to open log file {}", path.display()))?;
+        let mut reader = std::io::BufReader::new(file);
+        let mut raw_line = Vec::with_capacity(512);
+
+        loop {
+            raw_line.clear();
+            let n = std::io::BufRead::read_until(
+                &mut std::io::Read::take(&mut reader, MAX_SINGLE_LINE_BYTES),
+                b'\n',
+                &mut raw_line,
+            )
+            .with_context(|| format!("Failed to read log file {}", path.display()))?;
+            if n == 0 {
+                break;
+            }
+            while raw_line.last().is_some_and(|&b| b == b'\n' || b == b'\r') {
+                raw_line.pop();
+            }
+            let line = String::from_utf8_lossy(&raw_line).into_owned();
+            ingest_line(line);
         }
     }
 
@@ -333,11 +371,11 @@ package:/data/app/base.apk=com.example.chat
         let csv_path = write_timeline(&tl_res, &tmp.path().join("tl.csv")).unwrap();
         let csv = std::fs::read_to_string(csv_path).unwrap();
         assert!(csv.starts_with("timestamp,source,category,target,detail\n"));
-        assert!(csv.contains("2025-05-01T09:00:00.100Z,Run Telemetry,Error,E/logcat,BootCheck: failure"));
+        assert!(csv.contains("2025-05-01T09:00:00.100,Run Telemetry,Error,E/logcat,BootCheck: failure"));
 
         let jsonl_path = write_timeline(&tl_res, &tmp.path().join("tl.jsonl")).unwrap();
         let jsonl = std::fs::read_to_string(jsonl_path).unwrap();
-        assert!(jsonl.contains("\"timestamp\":\"2025-05-01T09:00:00.100Z\""));
+        assert!(jsonl.contains("\"timestamp\":\"2025-05-01T09:00:00.100\""));
 
         let prefs_path = tmp.path().join("prefs.xml");
         std::fs::write(
@@ -349,5 +387,38 @@ package:/data/app/base.apk=com.example.chat
         let prefs_csv_path = write_timeline(&prefs_res, &tmp.path().join("prefs_tl.csv")).unwrap();
         let prefs_csv = std::fs::read_to_string(prefs_csv_path).unwrap();
         assert!(prefs_csv.contains("SharedPrefs,Preference Epoch,last_sync"));
+
+        // Verify HTML and Markdown include Chronological Timeline and safe Markdown escaping
+        let tl_bundle = write_report(&tl_res, ReportFormat::All, &tmp.path().join("tl_bundle")).unwrap();
+        let tl_html = std::fs::read_to_string(&tl_bundle[0]).unwrap();
+        assert!(tl_html.contains("Chronological Timeline (1)"));
+        let tl_md = std::fs::read_to_string(&tl_bundle[2]).unwrap();
+        assert!(tl_md.contains("## Chronological Timeline (1)"));
+
+        // CSV formula injection neutralization
+        let mut formula_res = tl_res.clone();
+        formula_res.file_actions.push(android2rust_runner::FileActionRecord {
+            kind: android2rust_runner::FileActionKind::Error,
+            path: "=cmd|' /C calc'!A0".to_string(),
+            detail: "+SUM(1,2)".to_string(),
+            size_bytes: None,
+            timestamp: Some("2025-05-01 09:00:01.000".to_string()),
+        });
+        let formula_csv_path = write_timeline(&formula_res, &tmp.path().join("formula.csv")).unwrap();
+        let formula_csv = std::fs::read_to_string(formula_csv_path).unwrap();
+        assert!(formula_csv.contains("'=cmd"));
+        assert!(formula_csv.contains("'+SUM(1,2)"));
+
+        // UTF-16LE Windows log parsing (e.g. PowerShell `adb logcat > file.log`)
+        let utf16_path = tmp.path().join("ps_logcat.log");
+        let utf16_text = "R58M999\tdevice product:husky model:Pixel_8\r\n[ro.build.version.release]: [15]\r\n";
+        let mut utf16_bytes = vec![0xFF, 0xFE];
+        for u in utf16_text.encode_utf16() {
+            utf16_bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        std::fs::write(&utf16_path, &utf16_bytes).unwrap();
+        let utf16_res = parse_log_file_to_run_result(&utf16_path).unwrap();
+        assert_eq!(utf16_res.summary.devices_seen, 1);
+        assert_eq!(utf16_res.summary.properties_seen, 1);
     }
 }

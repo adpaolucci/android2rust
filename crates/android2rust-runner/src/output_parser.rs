@@ -198,27 +198,16 @@ impl AndroidOutputParser {
             });
         }
 
-        // adb devices -l or fastboot devices line
-        if !trimmed.starts_with("List of devices")
-            && !trimmed.starts_with('*')
-            && (trimmed.contains("\tdevice")
-                || trimmed.contains(" device ")
-                || trimmed.contains(" unauthorized")
-                || trimmed.contains(" offline")
-                || trimmed.contains("\tfastboot")
-                || trimmed.contains(" fastboot"))
+        if trimmed.starts_with("Failure [")
+            || trimmed.starts_with("FAILED (")
+            || trimmed.starts_with("adb: error:")
+            || trimmed.starts_with("adb.exe: error:")
+            || trimmed.starts_with("fastboot: error:")
+            || trimmed.starts_with("fastboot.exe: error:")
+            || trimmed.starts_with("error:")
         {
-            self.summary.devices_seen += 1;
-            let mut parts = trimmed.split_whitespace();
-            let serial = parts.next().unwrap_or(trimmed).to_string();
-            let detail = parts.collect::<Vec<_>>().join(" ");
-            return ParsedLineOutcome::Record(FileActionRecord {
-                kind: FileActionKind::Device,
-                path: serial,
-                detail,
-                size_bytes: None,
-                timestamp: None,
-            });
+            self.summary.errors_seen += 1;
+            return ParsedLineOutcome::Error(trimmed.to_string());
         }
 
         // Logcat threadtime
@@ -258,13 +247,37 @@ impl AndroidOutputParser {
             });
         }
 
-        if trimmed.starts_with("Failure [")
-            || trimmed.starts_with("FAILED (")
-            || trimmed.starts_with("adb: error:")
-            || trimmed.starts_with("error:")
-        {
-            self.summary.errors_seen += 1;
-            return ParsedLineOutcome::Error(trimmed.to_string());
+        // adb devices -l or fastboot devices line
+        if !trimmed.starts_with("List of devices") && !trimmed.starts_with('*') {
+            let mut parts = trimmed.split_whitespace();
+            if let Some(first_tok) = parts.next()
+                && !first_tok.ends_with(':')
+                && let Some(second_tok) = parts.next()
+                && (matches!(
+                    second_tok,
+                    "device"
+                        | "unauthorized"
+                        | "offline"
+                        | "fastboot"
+                        | "recovery"
+                        | "sideload"
+                        | "bootloader"
+                        | "authorizing"
+                ) || (second_tok == "no" && parts.clone().next() == Some("permissions")))
+            {
+                self.summary.devices_seen += 1;
+                let mut detail_parts = Vec::with_capacity(6);
+                detail_parts.push(second_tok);
+                detail_parts.extend(parts);
+                let detail = detail_parts.join(" ");
+                return ParsedLineOutcome::Record(FileActionRecord {
+                    kind: FileActionKind::Device,
+                    path: first_tok.to_string(),
+                    detail,
+                    size_bytes: None,
+                    timestamp: None,
+                });
+            }
         }
 
         ParsedLineOutcome::Plain
@@ -320,5 +333,13 @@ mod tests {
                 "FASTBOOT_LOCKED".to_string(),
             ]
         );
+        assert_eq!(p.summary.devices_seen, 0);
+
+        let logcat_err = p.feed_line("2025-05-01 09:00:00.100  1000  1001 E UsbMgr: device offline");
+        assert!(matches!(
+            logcat_err,
+            ParsedLineOutcome::Record(ref r) if r.kind == FileActionKind::Error
+        ));
+        assert_eq!(p.summary.devices_seen, 0);
     }
 }

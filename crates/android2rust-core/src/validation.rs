@@ -17,6 +17,25 @@ pub struct ValidationFinding {
     pub suggestion: Option<String>,
 }
 
+fn is_boot_critical_partition(part: &str) -> bool {
+    matches!(
+        part.to_ascii_lowercase().as_str(),
+        "bootloader" | "aboot" | "xbl" | "abl" | "radio" | "modem" | "efs"
+    )
+}
+
+fn warn_if_local_missing(path_str: &str, out: &mut Vec<ValidationFinding>) {
+    let trimmed = path_str.trim();
+    if !trimmed.is_empty() && !Path::new(trimmed).exists() {
+        out.push(ValidationFinding {
+            severity: ValidationSeverity::Warning,
+            code: "INPUT_FILE_NOT_FOUND".to_string(),
+            message: format!("Local input path '{trimmed}' does not currently exist on disk."),
+            suggestion: Some("Verify file path before live execution.".to_string()),
+        });
+    }
+}
+
 pub fn validate_job(job: &AndroidJob) -> Vec<ValidationFinding> {
     let mut out = Vec::new();
 
@@ -52,6 +71,8 @@ pub fn validate_job(job: &AndroidJob) -> Vec<ValidationFinding> {
                     message: "Local package/archive path is required for this operation.".to_string(),
                     suggestion: Some("Browse or enter a valid local .apk, .zip, or .ab path.".to_string()),
                 });
+            } else {
+                warn_if_local_missing(&job.source_path, &mut out);
             }
         }
         AndroidOperation::InspectArtifact => {
@@ -79,6 +100,8 @@ pub fn validate_job(job: &AndroidJob) -> Vec<ValidationFinding> {
                     message: "adb push requires both a local source path and a remote destination path.".to_string(),
                     suggestion: Some("Example remote destination: /sdcard/Download/".to_string()),
                 });
+            } else {
+                warn_if_local_missing(&job.source_path, &mut out);
             }
         }
         AndroidOperation::Pull => {
@@ -142,10 +165,7 @@ pub fn validate_job(job: &AndroidJob) -> Vec<ValidationFinding> {
                     message: "Target partition name is required for fastboot flash.".to_string(),
                     suggestion: Some("Specify a valid partition such as boot, init_boot, or recovery.".to_string()),
                 });
-            } else if matches!(
-                part.to_ascii_lowercase().as_str(),
-                "bootloader" | "aboot" | "xbl" | "abl" | "radio" | "modem" | "efs"
-            ) {
+            } else if is_boot_critical_partition(part) {
                 out.push(ValidationFinding {
                     severity: ValidationSeverity::Warning,
                     code: "CRITICAL_PARTITION_FLASH".to_string(),
@@ -164,6 +184,8 @@ pub fn validate_job(job: &AndroidJob) -> Vec<ValidationFinding> {
                     message: "Local .img file path is required for fastboot flash.".to_string(),
                     suggestion: None,
                 });
+            } else {
+                warn_if_local_missing(&job.source_path, &mut out);
             }
         }
         AndroidOperation::FastbootBoot => {
@@ -174,6 +196,8 @@ pub fn validate_job(job: &AndroidJob) -> Vec<ValidationFinding> {
                     message: "Local kernel/boot .img path is required for fastboot boot.".to_string(),
                     suggestion: None,
                 });
+            } else {
+                warn_if_local_missing(&job.source_path, &mut out);
             }
         }
         AndroidOperation::FastbootErase | AndroidOperation::FastbootFormat => {
@@ -189,9 +213,35 @@ pub fn validate_job(job: &AndroidJob) -> Vec<ValidationFinding> {
                     message: "Partition name is required for erase/format.".to_string(),
                     suggestion: None,
                 });
+            } else if is_boot_critical_partition(part) {
+                out.push(ValidationFinding {
+                    severity: ValidationSeverity::Warning,
+                    code: "CRITICAL_PARTITION_ERASE".to_string(),
+                    message: format!(
+                        "Partition '{part}' is boot-critical; erasing or formatting it can render the device unbootable."
+                    ),
+                    suggestion: Some("Double-check partition name and keep a verified factory image ready.".to_string()),
+                });
             }
         }
         _ => {}
+    }
+
+    if job.operation.default_tool() == crate::model::ToolFamily::Fastboot
+        && let Some(slot) = job
+            .fastboot_opts
+            .slot
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        && !matches!(slot.to_ascii_lowercase().as_str(), "a" | "b" | "all" | "other")
+    {
+        out.push(ValidationFinding {
+            severity: ValidationSeverity::Warning,
+            code: "INVALID_FASTBOOT_SLOT".to_string(),
+            message: format!("Fastboot slot '{slot}' is unusual; expected 'a', 'b', 'all', or 'other'."),
+            suggestion: Some("Set --slot to 'a', 'b', 'all', or 'other'.".to_string()),
+        });
     }
 
     if job.package_opts.third_party_only && job.package_opts.system_only {
@@ -233,5 +283,32 @@ mod tests {
         assert!(findings.iter().any(|f| f.code == "CRITICAL_PARTITION_FLASH"));
         assert!(findings.iter().any(|f| f.code == "MISSING_IMAGE_FILE"));
         assert!(findings.iter().any(|f| f.code == "DESTRUCTIVE_OP"));
+    }
+
+    #[test]
+    fn warns_on_critical_erase_invalid_slot_and_missing_local_input() {
+        let mut erase = AndroidJob {
+            tool: ToolFamily::Fastboot,
+            operation: AndroidOperation::FastbootErase,
+            ..Default::default()
+        };
+        erase.fastboot_opts.partition = "efs".to_string();
+        erase.fastboot_opts.slot = Some("c".to_string());
+        let erase_findings = validate_job(&erase);
+        assert!(erase_findings.iter().any(|f| f.code == "CRITICAL_PARTITION_ERASE"));
+        assert!(erase_findings.iter().any(|f| f.code == "INVALID_FASTBOOT_SLOT"));
+
+        let install = AndroidJob {
+            tool: ToolFamily::Adb,
+            operation: AndroidOperation::InstallApk,
+            source_path: r"Z:\does_not_exist\missing_demo_12345.apk".to_string(),
+            ..Default::default()
+        };
+        let inst_findings = validate_job(&install);
+        assert!(
+            inst_findings
+                .iter()
+                .any(|f| f.code == "INPUT_FILE_NOT_FOUND" && f.severity == ValidationSeverity::Warning)
+        );
     }
 }

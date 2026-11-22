@@ -24,6 +24,16 @@ pub fn view_history_view(app: &App) -> Element<'_, Message> {
                 button(text("Export Last MD...").size(12))
                     .on_press(Message::ExportReport(ReportFormat::Markdown))
                     .style(button::secondary),
+            )
+            .push(
+                button(text("Timeline CSV...").size(12))
+                    .on_press(Message::ExportReport(ReportFormat::TimelineCsv))
+                    .style(button::secondary),
+            )
+            .push(
+                button(text("Timeline JSONL...").size(12))
+                    .on_press(Message::ExportReport(ReportFormat::TimelineJsonl))
+                    .style(button::secondary),
             );
     }
     if !app.run_history.is_empty() {

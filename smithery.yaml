@@ -22,16 +22,16 @@ tools:
   - name: android2rust_build_command
     description: "Build validated ADB/Fastboot commands plus optional .a2r, .bat, .ps1, .sh, and schtasks scripts."
   - name: android2rust_parse_command
-    description: "Parse a raw adb/fastboot command line or .a2r recipe file into a structured validated job model."
+    description: "Parse a raw adb/fastboot/inspect command line or .a2r recipe file into a structured validated job model."
   - name: android2rust_decode_status
     description: "Decode Android/ADB/Fastboot exit codes and status strings (e.g. INSTALL_FAILED_*, DEVICE_UNAUTHORIZED) into remediation guidance."
   - name: android2rust_profiles
     description: "List, inspect, save, or delete persistent Android2Rust job profiles."
   - name: android2rust_inspect_artifact
-    description: "Perform pure-Rust offline forensic inspection of an .apk, .ab backup, SQLite .db, shared_prefs XML, or logcat/getprop dump."
+    description: "Perform pure-Rust offline forensic inspection of .apk (AXML/v1-v3.1/Janus/Zip-Slip), .ab (plain or PBKDF2/AES-256-CBC decrypted), Android 12+ ABX, bugreport .zip, SQLite .db (+ -wal/-shm/-journal), XML, directories, or text dumps."
   - name: android2rust_dry_run
-    description: "Run a non-destructive pre-flight simulation and optional local artifact inspection without mutating connected devices."
+    description: "Run a non-destructive pre-flight simulation and optional local artifact inspection (with optional case provenance and ab_password) without mutating connected devices."
   - name: android2rust_run
-    description: "Execute an ADB, Fastboot, or forensic job with strict confirmation checks for destructive operations (flash, erase, format, unlock, uninstall, restore)."
+    description: "Execute an ADB, Fastboot, or forensic job (with optional case provenance and ab_password) enforcing strict confirmation checks for destructive operations."
   - name: android2rust_report
-    description: "Generate self-contained offline HTML, JSON, or Markdown audit reports from an artifact, log file, or dry-run."
+    description: "Generate self-contained offline HTML, JSON, Markdown, or chronological CSV/JSONL timeline audit reports from an artifact, log file, or validated dry-run job."

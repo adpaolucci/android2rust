@@ -5,6 +5,24 @@ All notable changes to `android2rust` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Hostile-Evidence Parser Hardening & Modern Android DFIR**:
+  - Added Android 12+ `ABX\0` binary XML parser (`forensics/abx.rs`), structured binary AXML / plaintext `AndroidManifest.xml` security extraction (`forensics/axml.rs`, including `debuggable`, `allowBackup`, `usesCleartextTraffic`, `testOnly`, `networkSecurityConfig`, and exported component counts), and `adb bugreport` `.zip` inspection (`forensics/bugreport.rs` covering `dumpstate`, `usagestats`, `package`, `account`, tombstones, and ANRs).
+  - Added pure-Rust PBKDF2-HMAC-SHA1 / AES-256-CBC decryption for password-protected `.ab` backups (`forensics/ab_crypto.rs`, MSRV `1.89`) with `#[serde(skip)]` passphrase handling (`--password` / `ANDROID2RUST_AB_PASSWORD` / masked GUI passphrase field), plus `APK Sig Block 42` (`v2`/`v3`/`v3.1`/`SourceStamp-v1`/`v2`), SQLite `freelist_page_count`/`user_version`/`application_id`, and companion `-wal`/`-shm`/`-journal` hashing.
+  - Added dual `SHA-256` + `SHA-512` chain-of-custody digests, `CaseMetadata` (`--case-id`, `--evidence-id`, `--examiner`), chronological timeline extraction (`report::timeline`, `timeline-csv`, `timeline-jsonl`, and inline HTML/Markdown timeline tables), strict HTML `Content-Security-Policy`, and Windows MSVC release mitigations (`/STACK:16777216`, `-C control-flow-guard=on`, `/CETCOMPAT`, `SBOM-crates.txt`).
+- **Full CLI, MCP & Dual-GUI Wave 2 Parity**:
+  - Updated `android2rust-win32` and `android2rust-iced` with Case Provenance (`Case ID`, `Evidence ID`, `Examiner`), RAM-only `.ab` passphrase entry, editable Task Scheduler `/D` weekdays (Win32), `TransportId (-t)` support (Iced), dedicated `RunOfflineInspectionNow` action (Iced), and Timeline CSV/JSONL + JSON/Markdown report export dialogs.
+  - Updated CLI (`--password` on `dry-run`/`run`, bounded `.a2r` reads, field-preserving provenance merge), command builder/parser (`--case-id`/`--evidence-id`/`--examiner`, `pm enable --user`, operation-gated fastboot flags), `.a2r` (`case_id`/`evidence_id`/`examiner`, UTF-16BE), validation (`CRITICAL_PARTITION_ERASE`, `INVALID_FASTBOOT_SLOT`, `INPUT_FILE_NOT_FOUND`), and MCP (`case_id`/`evidence_id`/`examiner`/`ab_password` on `dry_run`/`run`, `validate_job` in `report`).
+
+### Fixed
+- Eliminated potential UTF-8 slice-boundary panics in SQLite `scan_sqlite_schema_tables`, `bugreport.rs::normalize_space_ts_to_iso`, and `parse_logcat_timestamp`.
+- Escaped `%VAR%` and shell metacharacters cleanly in generated `.bat` scripts (`build_batch_script`).
+- Fixed `AndroidOutputParser` ordering so `adb.exe:`/`fastboot.exe:` errors and logcat lines are never misclassified as connected devices.
+- Fixed `ProfileStore` error propagation (never overwriting unreadable/corrupted `profiles.json`/`history.json`) and non-ASCII profile slug collisions, runner error code attribution (`exit_code = 1` for forensic failures; cancellation priority over status tokens), bounded live stream/log buffers, CSV formula neutralization (CWE-1236), Markdown backtick escaping, UTF-16 BOM log parsing, and local vs. UTC timestamp preservation.
+- Populated `v0.1.0` SHA-256 digests in WinGet and Homebrew packaging manifests.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added

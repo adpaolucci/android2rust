@@ -29,6 +29,7 @@ pub struct App {
     pub job: AndroidJob,
 
     // Draft text fields
+    pub transport_id_text: String,
     pub user_id_text: String,
     pub backup_packages_text: String,
     pub logcat_buffers_text: String,
@@ -142,6 +143,7 @@ impl App {
 
         let mut app = Self {
             env,
+            transport_id_text: String::new(),
             user_id_text: String::new(),
             backup_packages_text: String::new(),
             logcat_buffers_text: String::new(),
@@ -223,6 +225,10 @@ impl App {
 
     pub fn set_job(&mut self, job: AndroidJob) {
         self.job = job;
+        self.transport_id_text = match self.job.transport {
+            TransportMode::TransportId(id) => id.to_string(),
+            _ => String::new(),
+        };
         self.user_id_text = self.job.package_opts.user_id.map(|v| v.to_string()).unwrap_or_default();
         self.backup_packages_text = join_tokens(&self.job.backup_opts.packages);
         self.logcat_buffers_text = join_tokens(&self.job.logcat_opts.buffers);
@@ -278,7 +284,8 @@ impl App {
             TransportMode::Auto => TransportChoice::Auto,
             TransportMode::Usb => TransportChoice::Usb,
             TransportMode::Emulator => TransportChoice::Emulator,
-            TransportMode::Serial(_) | TransportMode::TransportId(_) => TransportChoice::Serial,
+            TransportMode::Serial(_) => TransportChoice::Serial,
+            TransportMode::TransportId(_) => TransportChoice::TransportId,
         }
     }
 
@@ -380,13 +387,32 @@ impl App {
                     TransportChoice::Usb => TransportMode::Usb,
                     TransportChoice::Emulator => TransportMode::Emulator,
                     TransportChoice::Serial => TransportMode::Serial(self.job.serial.clone()),
+                    TransportChoice::TransportId => {
+                        let id = self
+                            .transport_id_text
+                            .trim()
+                            .parse::<u32>()
+                            .or_else(|_| self.job.serial.trim().parse::<u32>())
+                            .unwrap_or(1);
+                        if self.transport_id_text.trim().is_empty() {
+                            self.transport_id_text = id.to_string();
+                        }
+                        TransportMode::TransportId(id)
+                    }
                 };
                 self.refresh_derived();
             }
             Message::SerialChanged(s) => {
-                self.job.serial = s;
-                if matches!(self.job.transport, TransportMode::Serial(_)) {
-                    self.job.transport = TransportMode::Serial(self.job.serial.clone());
+                if matches!(self.job.transport, TransportMode::TransportId(_)) {
+                    self.transport_id_text = s.clone();
+                    if let Ok(id) = s.trim().parse::<u32>() {
+                        self.job.transport = TransportMode::TransportId(id);
+                    }
+                } else {
+                    self.job.serial = s;
+                    if matches!(self.job.transport, TransportMode::Serial(_)) {
+                        self.job.transport = TransportMode::Serial(self.job.serial.clone());
+                    }
                 }
                 self.refresh_derived();
             }
@@ -869,6 +895,30 @@ impl App {
                     self.job.forensic_opts.max_entries = n.max(10);
                 }
             }
+            Message::CaseIdChanged(s) => {
+                self.job.forensic_opts.case_meta.case_id = opt_nonempty(&s);
+                self.refresh_derived();
+            }
+            Message::EvidenceIdChanged(s) => {
+                self.job.forensic_opts.case_meta.evidence_id = opt_nonempty(&s);
+                self.refresh_derived();
+            }
+            Message::ExaminerChanged(s) => {
+                self.job.forensic_opts.case_meta.examiner = opt_nonempty(&s);
+                self.refresh_derived();
+            }
+            Message::AbPasswordChanged(s) => {
+                self.job.forensic_opts.ab_password = if s.is_empty() { None } else { Some(s) };
+            }
+            Message::RunOfflineInspectionNow => {
+                if !self.is_running {
+                    self.job.operation = AndroidOperation::InspectArtifact;
+                    self.job.tool = ToolFamily::Forensics;
+                    self.job.dry_run = false;
+                    self.refresh_derived();
+                    let _ = self.start_execution(self.job.clone());
+                }
+            }
             Message::ExtraArgsChanged(s) => {
                 self.extra_args_text = s.clone();
                 self.job.extra_args = split_tokens(&s);
@@ -1067,6 +1117,12 @@ impl App {
                 button::primary
             });
 
+        let (id_placeholder, id_value) = if matches!(self.job.transport, TransportMode::TransportId(_)) {
+            ("Transport ID (-t)", self.transport_id_text.as_str())
+        } else {
+            ("Serial (-s)", self.job.serial.as_str())
+        };
+
         let row_controls = row![
             pick_list(
                 AndroidOperation::ALL,
@@ -1082,7 +1138,7 @@ impl App {
             )
             .text_size(12)
             .width(Length::Fixed(165.0)),
-            text_input("Serial (-s)", &self.job.serial)
+            text_input(id_placeholder, id_value)
                 .on_input(Message::SerialChanged)
                 .size(12)
                 .width(Length::Fixed(110.0)),
@@ -1332,5 +1388,19 @@ mod tests {
         assert_eq!(app.batch_items[0].status, BatchItemStatus::Failed(1));
         assert!(!app.batch_running);
         assert!(!app.is_running);
+    }
+
+    #[test]
+    fn forensics_case_id_and_run_offline_inspection_switch_operation() {
+        let (mut app, _) = App::new(LaunchArgs {
+            source: Some("sample_prefs.xml".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(app.job.operation, AndroidOperation::Devices);
+        let _ = app.update(Message::CaseIdChanged("IR-ICED-1".to_string()));
+        let _ = app.update(Message::RunOfflineInspectionNow);
+        assert_eq!(app.job.operation, AndroidOperation::InspectArtifact);
+        assert!(app.cached_command.contains("--case-id IR-ICED-1"));
+        assert!(app.is_running);
     }
 }

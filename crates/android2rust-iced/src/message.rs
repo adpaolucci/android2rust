@@ -88,10 +88,11 @@ pub enum TransportChoice {
     Usb,
     Emulator,
     Serial,
+    TransportId,
 }
 
 impl TransportChoice {
-    pub const ALL: &'static [Self] = &[Self::Auto, Self::Usb, Self::Emulator, Self::Serial];
+    pub const ALL: &'static [Self] = &[Self::Auto, Self::Usb, Self::Emulator, Self::Serial, Self::TransportId];
 }
 
 impl fmt::Display for TransportChoice {
@@ -101,6 +102,7 @@ impl fmt::Display for TransportChoice {
             Self::Usb => write!(f, "USB Only (-d)"),
             Self::Emulator => write!(f, "Emulator Only (-e)"),
             Self::Serial => write!(f, "Explicit Serial (-s)"),
+            Self::TransportId => write!(f, "Transport ID (-t)"),
         }
     }
 }
@@ -230,6 +232,11 @@ pub enum Message {
     ToggleForensicSqlite(bool),
     ToggleForensicTar(bool),
     ForensicMaxEntriesChanged(String),
+    CaseIdChanged(String),
+    EvidenceIdChanged(String),
+    ExaminerChanged(String),
+    AbPasswordChanged(String),
+    RunOfflineInspectionNow,
     ExtraArgsChanged(String),
 
     // Live Console & Diff

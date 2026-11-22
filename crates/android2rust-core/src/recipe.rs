@@ -58,6 +58,15 @@ pub fn parse_recipe(bytes: &[u8]) -> Result<(AndroidJob, Vec<String>)> {
             "slot" => {
                 job.fastboot_opts.slot = if val.is_empty() { None } else { Some(val.to_string()) };
             }
+            "case_id" => {
+                job.forensic_opts.case_meta.case_id = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
+            "evidence_id" => {
+                job.forensic_opts.case_meta.evidence_id = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
+            "examiner" => {
+                job.forensic_opts.case_meta.examiner = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
             "dry_run" => job.dry_run = val.eq_ignore_ascii_case("true") || val == "1",
             _ => warnings.push(format!("Line {}: unknown recipe key '{key}'", idx + 1)),
         }
@@ -70,6 +79,13 @@ fn decode_text_bytes(bytes: &[u8]) -> Result<String> {
         let mut units = Vec::with_capacity((bytes.len() - 2) / 2);
         for chunk in bytes[2..].as_chunks::<2>().0 {
             units.push(u16::from_le_bytes(*chunk));
+        }
+        return Ok(String::from_utf16(&units)?);
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let mut units = Vec::with_capacity((bytes.len() - 2) / 2);
+        for chunk in bytes[2..].as_chunks::<2>().0 {
+            units.push(u16::from_be_bytes(*chunk));
         }
         return Ok(String::from_utf16(&units)?);
     }
@@ -104,5 +120,17 @@ mod tests {
         assert!(kv_warn.is_empty());
         assert_eq!(parsed_kv.operation, AndroidOperation::FastbootFlash);
         assert_eq!(parsed_kv.fastboot_opts.slot.as_deref(), Some("b"));
+
+        let kv_meta = "operation=inspect\nsource=ev.apk\ncase_id=IR-7\nevidence_id=EV-3\nexaminer=Ada\n";
+        let mut utf16be = vec![0xFE, 0xFF];
+        for u in kv_meta.encode_utf16() {
+            utf16be.extend_from_slice(&u.to_be_bytes());
+        }
+        let (parsed_be, be_warn) = parse_recipe(&utf16be).unwrap();
+        assert!(be_warn.is_empty());
+        assert_eq!(parsed_be.operation, AndroidOperation::InspectArtifact);
+        assert_eq!(parsed_be.forensic_opts.case_meta.case_id.as_deref(), Some("IR-7"));
+        assert_eq!(parsed_be.forensic_opts.case_meta.evidence_id.as_deref(), Some("EV-3"));
+        assert_eq!(parsed_be.forensic_opts.case_meta.examiner.as_deref(), Some("Ada"));
     }
 }

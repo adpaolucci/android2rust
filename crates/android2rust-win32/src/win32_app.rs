@@ -24,11 +24,15 @@ const IDM_EXPORT_SH: u16 = 4005;
 const IDM_REPORT_HTML: u16 = 4006;
 const IDM_REPORT_ALL: u16 = 4007;
 const IDM_EXIT: u16 = 4008;
+const IDM_REPORT_TL_CSV: u16 = 4009;
 
 const IDM_RESET_JOB: u16 = 4010;
+const IDM_REPORT_TL_JSONL: u16 = 4011;
 const IDM_COPY_CMD: u16 = 4012;
 const IDM_SAVE_PROFILE: u16 = 4013;
 const IDM_QUEUE_ADD: u16 = 4014;
+const IDM_REPORT_JSON: u16 = 4015;
+const IDM_REPORT_MD: u16 = 4016;
 
 const IDM_DRY_RUN: u16 = 4020;
 const IDM_RUN_JOB: u16 = 4021;
@@ -135,6 +139,16 @@ fn repos_ctrl(ctrl: &impl GuiWindow, x: i32, y: i32) {
     }
 }
 
+fn opt_edit_trim(ed: &gui::Edit) -> Option<String> {
+    let raw = ed.text().unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 #[derive(Clone)]
 struct DesignerPage {
     page: gui::TabPage,
@@ -145,6 +159,7 @@ struct DesignerPage {
     sch_name: gui::Edit,
     sch_cadence: gui::ComboBox,
     sch_time: gui::Edit,
+    sch_days: gui::Edit,
     sch_highest: gui::CheckBox,
     sch_preview: gui::Edit,
     btn_copy_sch: gui::Button,
@@ -172,22 +187,24 @@ impl DesignerPage {
             (gui::Horz::None, gui::Vert::None),
         );
 
-        lbl(&page, "Task Name:", 10, 74, 70);
-        let sch_name = edit(&page, 85, 71, 200, 22, (gui::Horz::None, gui::Vert::None));
-        lbl(&page, "Cadence:", 295, 74, 58);
+        lbl(&page, "Task Name:", 10, 74, 68);
+        let sch_name = edit(&page, 80, 71, 145, 22, (gui::Horz::None, gui::Vert::None));
+        lbl(&page, "Cadence:", 232, 74, 55);
         let sch_cadence = gui::ComboBox::new(
             &page,
             gui::ComboBoxOpts {
-                position: gui::dpi(356, 71),
-                width: gui::dpi_x(105),
+                position: gui::dpi(290, 71),
+                width: gui::dpi_x(95),
                 items: &["DAILY", "WEEKLY", "HOURLY", "ONSTART", "ONLOGON"],
                 selected_item: Some(0),
                 ..Default::default()
             },
         );
-        lbl(&page, "Time:", 472, 74, 38);
-        let sch_time = edit(&page, 512, 71, 65, 22, (gui::Horz::None, gui::Vert::None));
-        let sch_highest = chk(&page, "/RL HIGHEST", 588, 73);
+        lbl(&page, "Time:", 392, 74, 34);
+        let sch_time = edit(&page, 428, 71, 52, 22, (gui::Horz::None, gui::Vert::None));
+        lbl(&page, "Days:", 488, 74, 36);
+        let sch_days = edit(&page, 526, 71, 100, 22, (gui::Horz::None, gui::Vert::None));
+        let sch_highest = chk(&page, "/RL HIGHEST", 634, 73);
         let btn_copy_sch = btn(
             &page,
             "Copy schtasks",
@@ -289,6 +306,7 @@ impl DesignerPage {
             sch_name,
             sch_cadence,
             sch_time,
+            sch_days,
             sch_highest,
             sch_preview,
             btn_copy_sch,
@@ -493,6 +511,10 @@ struct ForensicsPage {
     ab_tar: gui::CheckBox,
     max_entries: gui::Edit,
     extra_args: gui::Edit,
+    case_id: gui::Edit,
+    evidence_id: gui::Edit,
+    examiner: gui::Edit,
+    ab_password: gui::Edit,
 }
 
 impl ForensicsPage {
@@ -501,20 +523,67 @@ impl ForensicsPage {
 
         lbl(
             &page,
-            "Pure-Rust Offline Forensics (APK / .ab Backup / SQLite .db / XML / Directory):",
+            "Pure-Rust Offline Forensics (APK / .ab / ABX / Bugreport ZIP / SQLite .db / XML / Directory):",
             10,
             14,
-            550,
+            640,
         );
-        let sha256 = chk(&page, "Compute SHA-256 Chain-of-Custody Hash", 20, 42);
-        let manifest_perms = chk(&page, "Extract AndroidManifest.xml Permissions from APK/XML", 20, 72);
-        let sqlite_tables = chk(&page, "Scan SQLite 3 Header, WAL Flag && CREATE TABLE Schemas", 20, 102);
-        let ab_tar = chk(&page, "Decompress Unencrypted .ab Backup && List TAR Entries", 20, 132);
+        let sha256 = chk(
+            &page,
+            "Compute Dual SHA-256 && SHA-512 Chain-of-Custody Digests",
+            20,
+            42,
+        );
+        let manifest_perms = chk(
+            &page,
+            "Extract AXML Security Flags && AndroidManifest.xml Permissions",
+            20,
+            72,
+        );
+        let sqlite_tables = chk(
+            &page,
+            "Scan SQLite 3 Header, Freelist, -wal/-shm/-journal && CREATE TABLE Schemas",
+            20,
+            102,
+        );
+        let ab_tar = chk(
+            &page,
+            "Decompress / Decrypt .ab Backup && List TAR / Bugreport Entries",
+            20,
+            132,
+        );
 
         lbl(&page, "Max Entries:", 20, 172, 90);
         let max_entries = edit(&page, 115, 169, 95, 22, (gui::Horz::None, gui::Vert::None));
         lbl(&page, "Extra Raw CLI Args:", 235, 172, 130);
-        let extra_args = edit(&page, 370, 169, 440, 22, (gui::Horz::None, gui::Vert::None));
+        let extra_args = edit(&page, 370, 169, 450, 22, (gui::Horz::None, gui::Vert::None));
+
+        lbl(&page, "Case ID:", 20, 209, 60);
+        let case_id = edit(&page, 85, 206, 175, 22, (gui::Horz::None, gui::Vert::None));
+        lbl(&page, "Evidence ID:", 275, 209, 80);
+        let evidence_id = edit(&page, 360, 206, 175, 22, (gui::Horz::None, gui::Vert::None));
+        lbl(&page, "Examiner:", 550, 209, 65);
+        let examiner = edit(&page, 620, 206, 200, 22, (gui::Horz::None, gui::Vert::None));
+
+        lbl(&page, ".ab Passphrase:", 20, 247, 100);
+        let ab_password = gui::Edit::new(
+            &page,
+            gui::EditOpts {
+                position: gui::dpi(125, 244),
+                width: gui::dpi_x(260),
+                height: gui::dpi_y(22),
+                control_style: co::ES::AUTOHSCROLL | co::ES::PASSWORD,
+                resize_behavior: (gui::Horz::None, gui::Vert::None),
+                ..Default::default()
+            },
+        );
+        lbl(
+            &page,
+            "(RAM only — never written to .a2r recipes, profiles.json, or JSON reports)",
+            395,
+            247,
+            460,
+        );
 
         Self {
             page,
@@ -524,6 +593,10 @@ impl ForensicsPage {
             ab_tar,
             max_entries,
             extra_args,
+            case_id,
+            evidence_id,
+            examiner,
+            ab_password,
         }
     }
 }
@@ -536,6 +609,8 @@ struct ConsolePage {
     filter_combo: gui::ComboBox,
     btn_copy_log: gui::Button,
     btn_export_html: gui::Button,
+    btn_export_tl_csv: gui::Button,
+    btn_export_tl_jsonl: gui::Button,
     btn_export_all: gui::Button,
     actions_list: gui::ListView,
     raw_log_edit: gui::Edit,
@@ -559,22 +634,24 @@ impl ConsolePage {
             "Idle — ready for ADB, Fastboot, or Offline Forensic Inspection.",
             230,
             12,
-            340,
+            240,
         );
 
         let filter_combo = gui::ComboBox::new(
             &page,
             gui::ComboBoxOpts {
-                position: gui::dpi(580, 9),
-                width: gui::dpi_x(135),
+                position: gui::dpi(475, 9),
+                width: gui::dpi_x(130),
                 items: &["All Records", "Devices/Pkgs/Props", "Transfers/Forensics", "Errors"],
                 selected_item: Some(0),
                 ..Default::default()
             },
         );
-        let btn_copy_log = btn(&page, "Copy Log", 720, 8, 74, 24, (gui::Horz::None, gui::Vert::None));
-        let btn_export_html = btn(&page, "HTML...", 798, 8, 64, 24, (gui::Horz::None, gui::Vert::None));
-        let btn_export_all = btn(&page, "All...", 866, 8, 54, 24, (gui::Horz::None, gui::Vert::None));
+        let btn_copy_log = btn(&page, "Copy Log", 611, 8, 68, 24, (gui::Horz::None, gui::Vert::None));
+        let btn_export_html = btn(&page, "HTML...", 683, 8, 58, 24, (gui::Horz::None, gui::Vert::None));
+        let btn_export_tl_csv = btn(&page, "TL CSV", 745, 8, 58, 24, (gui::Horz::None, gui::Vert::None));
+        let btn_export_tl_jsonl = btn(&page, "TL JSONL", 807, 8, 68, 24, (gui::Horz::None, gui::Vert::None));
+        let btn_export_all = btn(&page, "All...", 879, 8, 48, 24, (gui::Horz::None, gui::Vert::None));
 
         let actions_list = gui::ListView::new(
             &page,
@@ -610,6 +687,8 @@ impl ConsolePage {
             let filter_combo = filter_combo.clone();
             let btn_copy_log = btn_copy_log.clone();
             let btn_export_html = btn_export_html.clone();
+            let btn_export_tl_csv = btn_export_tl_csv.clone();
+            let btn_export_tl_jsonl = btn_export_tl_jsonl.clone();
             let btn_export_all = btn_export_all.clone();
             let actions_list = actions_list.clone();
             let raw_log_edit = raw_log_edit.clone();
@@ -622,16 +701,22 @@ impl ConsolePage {
                 let pad = gui::dpi_x(10);
                 let gap = gui::dpi_x(8);
                 let sp = gui::dpi_x(4);
-                let w_all = gui::dpi_x(54);
-                let x_all = (w - pad - w_all).max(gui::dpi_x(720));
-                let w_html = gui::dpi_x(64);
-                let x_html = x_all - sp - w_html;
-                let w_copy = gui::dpi_x(74);
+                let w_all = gui::dpi_x(48);
+                let x_all = (w - pad - w_all).max(gui::dpi_x(760));
+                let w_jsonl = gui::dpi_x(68);
+                let x_jsonl = x_all - sp - w_jsonl;
+                let w_csv = gui::dpi_x(58);
+                let x_csv = x_jsonl - sp - w_csv;
+                let w_html = gui::dpi_x(58);
+                let x_html = x_csv - sp - w_html;
+                let w_copy = gui::dpi_x(68);
                 let x_copy = x_html - sp - w_copy;
-                let w_flt = gui::dpi_x(135);
+                let w_flt = gui::dpi_x(130);
                 let x_flt = x_copy - gui::dpi_x(6) - w_flt;
 
                 move_ctrl(&btn_export_all, x_all, gui::dpi_y(8), w_all, gui::dpi_y(24));
+                move_ctrl(&btn_export_tl_jsonl, x_jsonl, gui::dpi_y(8), w_jsonl, gui::dpi_y(24));
+                move_ctrl(&btn_export_tl_csv, x_csv, gui::dpi_y(8), w_csv, gui::dpi_y(24));
                 move_ctrl(&btn_export_html, x_html, gui::dpi_y(8), w_html, gui::dpi_y(24));
                 move_ctrl(&btn_copy_log, x_copy, gui::dpi_y(8), w_copy, gui::dpi_y(24));
                 repos_ctrl(&filter_combo, x_flt, gui::dpi_y(9));
@@ -639,7 +724,7 @@ impl ConsolePage {
                     &summary_lbl,
                     gui::dpi_x(230),
                     gui::dpi_y(12),
-                    (x_flt - gap - gui::dpi_x(230)).max(gui::dpi_x(100)),
+                    (x_flt - gap - gui::dpi_x(230)).max(gui::dpi_x(80)),
                     gui::dpi_y(18),
                 );
 
@@ -667,6 +752,8 @@ impl ConsolePage {
             filter_combo,
             btn_copy_log,
             btn_export_html,
+            btn_export_tl_csv,
+            btn_export_tl_jsonl,
             btn_export_all,
             actions_list,
             raw_log_edit,
@@ -900,6 +987,22 @@ fn build_main_menu() -> w::SysResult<w::HMENU> {
         w::MenuItem::Entry {
             cmd_id: IDM_REPORT_HTML,
             text: "Export Last Run HTML Report...",
+        },
+        w::MenuItem::Entry {
+            cmd_id: IDM_REPORT_JSON,
+            text: "Export Last Run JSON Report...",
+        },
+        w::MenuItem::Entry {
+            cmd_id: IDM_REPORT_MD,
+            text: "Export Last Run Markdown Report...",
+        },
+        w::MenuItem::Entry {
+            cmd_id: IDM_REPORT_TL_CSV,
+            text: "Export Chronological Timeline (CSV)...",
+        },
+        w::MenuItem::Entry {
+            cmd_id: IDM_REPORT_TL_JSONL,
+            text: "Export Chronological Timeline (JSONL)...",
         },
         w::MenuItem::Entry {
             cmd_id: IDM_REPORT_ALL,
@@ -1301,6 +1404,22 @@ impl Win32App {
             .max_entries
             .set_text(&j.forensic_opts.max_entries.to_string());
         let _ = self.forensics_pg.extra_args.set_text(&join_tokens(&j.extra_args));
+        let _ = self
+            .forensics_pg
+            .case_id
+            .set_text(j.forensic_opts.case_meta.case_id.as_deref().unwrap_or(""));
+        let _ = self
+            .forensics_pg
+            .evidence_id
+            .set_text(j.forensic_opts.case_meta.evidence_id.as_deref().unwrap_or(""));
+        let _ = self
+            .forensics_pg
+            .examiner
+            .set_text(j.forensic_opts.case_meta.examiner.as_deref().unwrap_or(""));
+        let _ = self
+            .forensics_pg
+            .ab_password
+            .set_text(j.forensic_opts.ab_password.as_deref().unwrap_or(""));
 
         drop(st);
         self.suppress_sync.store(false, Ordering::SeqCst);
@@ -1322,11 +1441,11 @@ impl Win32App {
                 j.tool = op.default_tool();
             }
             j.serial = self.serial_edit.text().unwrap_or_default().trim().to_string();
-            j.transport = if j.serial.is_empty() {
-                TransportMode::Auto
-            } else {
-                TransportMode::Serial(j.serial.clone())
-            };
+            if !j.serial.is_empty() {
+                j.transport = TransportMode::Serial(j.serial.clone());
+            } else if matches!(j.transport, TransportMode::Serial(_)) {
+                j.transport = TransportMode::Auto;
+            }
             j.source_path = self.src_edit.text().unwrap_or_default();
             j.target_path = self.tgt_edit.text().unwrap_or_default();
 
@@ -1404,6 +1523,11 @@ impl Win32App {
                 j.forensic_opts.max_entries = m.max(10);
             }
             j.extra_args = split_tokens(&self.forensics_pg.extra_args.text().unwrap_or_default());
+            j.forensic_opts.case_meta.case_id = opt_edit_trim(&self.forensics_pg.case_id);
+            j.forensic_opts.case_meta.evidence_id = opt_edit_trim(&self.forensics_pg.evidence_id);
+            j.forensic_opts.case_meta.examiner = opt_edit_trim(&self.forensics_pg.examiner);
+            let pw = self.forensics_pg.ab_password.text().unwrap_or_default();
+            j.forensic_opts.ab_password = if pw.is_empty() { None } else { Some(pw) };
 
             st.refresh_derived();
         }
@@ -1450,10 +1574,16 @@ impl Win32App {
             Some(4) => ScheduleCadence::OnLogon,
             _ => ScheduleCadence::Daily,
         };
+        let days_raw = self.designer.sch_days.text().unwrap_or_default();
+        let days = if days_raw.trim().is_empty() {
+            None
+        } else {
+            Some(days_raw.trim().to_string())
+        };
         let spec = ScheduleSpec {
             cadence,
             start_time: self.designer.sch_time.text().unwrap_or_else(|_| "02:00".to_string()),
-            days: Some("MON,WED,FRI".to_string()),
+            days,
             run_highest: self.designer.sch_highest.is_checked(),
         };
         let cmd = build_schtasks_command(&task_name, cmd_line, &spec);
@@ -1935,24 +2065,59 @@ impl Win32App {
             return;
         };
 
-        let target = if fmt == ReportFormat::All {
-            pick_folder(
+        let target = match fmt {
+            ReportFormat::All => pick_folder(
                 self.wnd.hwnd(),
                 "Select Folder for HTML + JSON + Markdown Report Bundle",
             )
             .ok()
             .flatten()
-            .map(std::path::PathBuf::from)
-        } else {
-            pick_save_file(
+            .map(std::path::PathBuf::from),
+            ReportFormat::Html => pick_save_file(
                 self.wnd.hwnd(),
-                "Save Android2Rust Audit Report",
+                "Save Android2Rust HTML Audit Report",
                 "android2rust_report.html",
                 "html",
-                &[("HTML Report", "*.html")],
+                &[("HTML Report (*.html)", "*.html")],
             )
             .ok()
-            .flatten()
+            .flatten(),
+            ReportFormat::Json => pick_save_file(
+                self.wnd.hwnd(),
+                "Save Android2Rust JSON Audit Report",
+                "android2rust_report.json",
+                "json",
+                &[("JSON Report (*.json)", "*.json")],
+            )
+            .ok()
+            .flatten(),
+            ReportFormat::Markdown => pick_save_file(
+                self.wnd.hwnd(),
+                "Save Android2Rust Markdown Audit Report",
+                "android2rust_report.md",
+                "md",
+                &[("Markdown Report (*.md)", "*.md")],
+            )
+            .ok()
+            .flatten(),
+            ReportFormat::TimelineCsv => pick_save_file(
+                self.wnd.hwnd(),
+                "Save Chronological Timeline (CSV)",
+                "android2rust_timeline.csv",
+                "csv",
+                &[("CSV Timeline (*.csv)", "*.csv")],
+            )
+            .ok()
+            .flatten(),
+            ReportFormat::TimelineJsonl => pick_save_file(
+                self.wnd.hwnd(),
+                "Save Chronological Timeline (JSONL)",
+                "android2rust_timeline.jsonl",
+                "jsonl",
+                &[("JSONL Timeline (*.jsonl)", "*.jsonl")],
+            )
+            .ok()
+            .flatten(),
         };
 
         if let Some(path) = target {
@@ -2071,6 +2236,7 @@ impl Win32App {
             self2.suppress_sync.store(true, Ordering::SeqCst);
             let _ = self2.designer.sch_name.set_text("Android2Rust_DailyPull");
             let _ = self2.designer.sch_time.set_text("02:00");
+            let _ = self2.designer.sch_days.set_text("MON,WED,FRI");
             self2.designer.sch_highest.set_check(true);
             let _ = self2.batch_pg.code_edit.set_text("DEVICE_UNAUTHORIZED");
             self2.batch_pg.chk_stop_err.set_check(true);
@@ -2148,7 +2314,11 @@ impl Win32App {
         wire_edit(&self.designer.job_name);
         wire_edit(&self.designer.job_desc);
 
-        for ed in [&self.designer.sch_name, &self.designer.sch_time] {
+        for ed in [
+            &self.designer.sch_name,
+            &self.designer.sch_time,
+            &self.designer.sch_days,
+        ] {
             let app = self.clone();
             ed.on().en_change(move || {
                 let cmd = app.state.lock().unwrap().cached_command.clone();
@@ -2184,6 +2354,10 @@ impl Win32App {
             &self.fastboot_pg.slot,
             &self.forensics_pg.max_entries,
             &self.forensics_pg.extra_args,
+            &self.forensics_pg.case_id,
+            &self.forensics_pg.evidence_id,
+            &self.forensics_pg.examiner,
+            &self.forensics_pg.ab_password,
         ] {
             wire_edit(ed);
         }
@@ -2272,7 +2446,10 @@ impl Win32App {
                     app.wnd.hwnd(),
                     "Select APK, .ab Backup, Image, SQLite DB, or Log",
                     &[
-                        ("Android Artifacts", "*.apk;*.ab;*.img;*.zip;*.db;*.xml;*.log"),
+                        (
+                            "Android Artifacts",
+                            "*.apk;*.ab;*.abx;*.img;*.zip;*.db;*.sqlite;*.sqlite3;*.xml;*.log",
+                        ),
                         ("All Files", "*.*"),
                     ],
                 ) {
@@ -2465,6 +2642,20 @@ impl Win32App {
             let app = self.clone();
             self.console_pg.btn_export_html.on().bn_clicked(move || {
                 app.export_report(ReportFormat::Html);
+                Ok(())
+            });
+        }
+        {
+            let app = self.clone();
+            self.console_pg.btn_export_tl_csv.on().bn_clicked(move || {
+                app.export_report(ReportFormat::TimelineCsv);
+                Ok(())
+            });
+        }
+        {
+            let app = self.clone();
+            self.console_pg.btn_export_tl_jsonl.on().bn_clicked(move || {
+                app.export_report(ReportFormat::TimelineJsonl);
                 Ok(())
             });
         }
@@ -2760,6 +2951,16 @@ impl Win32App {
             }),
         );
         wire_menu(IDM_REPORT_HTML, Box::new(|a| a.export_report(ReportFormat::Html)));
+        wire_menu(IDM_REPORT_JSON, Box::new(|a| a.export_report(ReportFormat::Json)));
+        wire_menu(IDM_REPORT_MD, Box::new(|a| a.export_report(ReportFormat::Markdown)));
+        wire_menu(
+            IDM_REPORT_TL_CSV,
+            Box::new(|a| a.export_report(ReportFormat::TimelineCsv)),
+        );
+        wire_menu(
+            IDM_REPORT_TL_JSONL,
+            Box::new(|a| a.export_report(ReportFormat::TimelineJsonl)),
+        );
         wire_menu(IDM_REPORT_ALL, Box::new(|a| a.export_report(ReportFormat::All)));
         wire_menu(
             IDM_EXIT,

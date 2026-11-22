@@ -61,9 +61,9 @@ Both GUIs provide full feature parity across:
 - **Designer & Diagnostics**: Job identity, 8 built-in presets (device triage, props fingerprint, 3rd-party package audit, APK install/grant, logcat crash snapshot, pull evidence, guarded fastboot flash preview, and offline forensic audit), bidirectional CLI importer, persistent `%APPDATA%\android2rust\profiles.json`, Windows Task Scheduler (`schtasks /Create`) generator, and real-time validation diagnostics.
 - **ADB & Packages**: `-s` serial / `-d` USB / `-e` emulator / `-t` transport ID targeting, `devices -l`, `getprop`, `pm list packages` filters (`-3`, `-s`, `-f`, `-i`, `-U`), `install` (`-r`, `-d`, `-g`, `--user`), `uninstall` (`-k`), `disable-user` / `enable`, `shell`, `dumpsys`, `sideload`, and `reboot` targets.
 - **Transfer, Backup & Logcat**: `adb pull` / `adb push` (`-a` preserve timestamps, `-z` compression), `adb backup` / `adb restore` (`-apk`, `-obb`, `-shared`, `-all`, `-system`), `bugreport`, and `logcat` (`-b` buffers, `-d`, `-c`, `-v` format, `-t` max lines, filter specs).
-- **Fastboot & Partitions**: `devices`, `getvar all`, `flash` (slot `--slot`, `--skip-reboot`, `--disable-verity`, `--disable-verification`), `boot`, `erase`, `format`, `flashing unlock/lock`, and `reboot` (`bootloader`, `fastbootd`, `recovery`).
-- **Offline Forensics & Artifacts**: Pure-Rust zero-dependency inspection of local `.apk` archives (`AndroidManifest.xml` permissions, DEX/native `.so`/signature entries), Android `.ab` backups (header + zlib decompression + TAR entry table), SQLite `.db` files (page size, WAL mode, `CREATE TABLE` schema recovery), `shared_prefs` XML keys, and `logcat`/`getprop` dumps.
-- **Live Console, Batch Queue & History**: Real-time output parsing, filterable extracted records table, raw console stream, ordered multi-job queue (`Stop on Error`), persistent run history, and one-click HTML/JSON/Markdown audit reports.
+- **Fastboot & Partitions**: `devices`, `getvar all`, `flash` (slot `--slot`, `--skip-reboot`, `--disable-verity`, `--disable-verification`, `-w`), `boot`, `erase`, `format`, `flashing unlock/lock`, and `reboot` (`bootloader`, `fastbootd`, `recovery`).
+- **Offline Forensics & Provenance**: Pure-Rust zero-dependency inspection of local `.apk` archives (`AndroidManifest.xml` AXML security flags & permissions, DEX/native `.so` ABIs, v1 + `APK Sig Block 42` v2/v3/v3.1 signatures), `.ab` backups (plain and PBKDF2/AES-256-CBC decrypted via RAM-only passphrase), Android 12+ `ABX\0`, `adb bugreport` `.zip` dumps, SQLite `.db` files (page size, freelist pages, `user_version`, `application_id`, WAL mode, `CREATE TABLE` schema recovery, `-wal`/`-shm`/`-journal` digests), `shared_prefs` XML keys, `logcat`/`getprop` dumps, plus Case Provenance (`Case ID`, `Evidence ID`, `Examiner`) fields.
+- **Live Console, Batch Queue & History**: Real-time output parsing, filterable extracted records table, raw console stream, ordered multi-job queue (`Stop on Error`), persistent run history, and one-click HTML/JSON/Markdown + chronological Timeline CSV/JSONL audit reports.
 
 ---
 
@@ -122,9 +122,9 @@ Add `mcp.json` to your MCP-compatible client (`command: "android2rust"`, `args: 
 5. `android2rust_decode_status` — Android/ADB/Fastboot status & exit-code decoder
 6. `android2rust_profiles` — Persistent profile CRUD (`list`, `get`, `save`, `delete`)
 7. `android2rust_inspect_artifact` — Pure-Rust offline `.apk` / `.ab` / `ABX` / `bugreport.zip` / `.db` / XML / log forensic inspector (with `ab_password`, `case_id`, `evidence_id`, `examiner`)
-8. `android2rust_dry_run` — Safe non-destructive pre-flight simulation
-9. `android2rust_run` — Live execution with strict `confirm_destructive: true` refusal guard for destructive ADB/Fastboot operations
-10. `android2rust_report` — Offline HTML / JSON / Markdown / Timeline CSV & JSONL audit generator
+8. `android2rust_dry_run` — Safe non-destructive pre-flight simulation (with optional `ab_password`, `case_id`, `evidence_id`, `examiner`)
+9. `android2rust_run` — Live execution (with optional `ab_password`, `case_id`, `evidence_id`, `examiner`) and strict `confirm_destructive: true` refusal guard
+10. `android2rust_report` — Validated offline HTML / JSON / Markdown / Timeline CSV & JSONL audit generator
 
 ---
 
@@ -152,7 +152,7 @@ Informed by public forensic-parser vulnerability disclosures (such as Signal's A
 - **`#![forbid(unsafe_code)]` Core & Tooling**: Compiled with `#![forbid(unsafe_code)]` across `core`, `runner`, `report`, `mcp`, `cli`, and `iced` (`unsafe` isolated solely to the Windows Win32 windowing wrapper).
 - **Streaming Dual Digests & Decompression-Bomb Caps**: Hashes arbitrarily large artifacts in `64 KiB` chunks for dual **SHA-256 + SHA-512** custody while capping in-memory artifact reads (`256 MiB`), `.ab` zlib inflation (`128 MiB`), `bugreport` text (`64 MiB`), and ZIP entry inflation (`32 MiB`).
 - **Tamper & Anomaly Detection**: Flags Zip-Slip (`..`), embedded `NUL` bytes, absolute/drive paths, Unicode BiDi spoofing (`U+202A..202E`, `U+2066..2069`), ZIP Local-vs-Central header mismatches, and Dalvik `dex\n` preambles (`Janus`).
-- **Modern Android DFIR**: Parses Android 12+ `ABX\0` binary XML, structured AXML manifest security flags (`debuggable`, `allowBackup`, `usesCleartextTraffic`), `adb bugreport` ZIPs (`dumpstate`, `usagestats`, `package`, `account`, tombstones/ANRs), `APK Sig Block 42` schemes (`v2`, `v3`, `v3.1`, `SourceStamp-v1`/`v2`), lawful `.ab` PBKDF2-HMAC-SHA1 / AES-256-CBC decryption (`ab_password` skipped from serialization), SQLite `freelist_page_count` / `user_version` / `application_id` + companion `-wal`/`-shm`/`-journal` streams, case provenance (`--case-id`, `--evidence-id`, `--examiner`), and chronological CSV/JSONL timelines (`--timeline`).
+- **Modern Android DFIR**: Parses Android 12+ `ABX\0` binary XML, structured AXML manifest security flags (`debuggable`, `allowBackup`, `usesCleartextTraffic`, `testOnly`, `networkSecurityConfig`, exported component counts), `adb bugreport` ZIPs (`dumpstate`, `usagestats`, `package`, `account`, tombstones/ANRs), `APK Sig Block 42` schemes (`v2`, `v3`, `v3.1`, `SourceStamp-v1`/`v2`), lawful `.ab` PBKDF2-HMAC-SHA1 / AES-256-CBC decryption (`ab_password` skipped from serialization), SQLite `freelist_page_count` / `user_version` / `application_id` + companion `-wal`/`-shm`/`-journal` streams, case provenance (`--case-id`, `--evidence-id`, `--examiner`), CSV formula neutralization (CWE-1236), UTF-16 BOM log ingestion, and chronological CSV/JSONL timelines (`--timeline`).
 - **Air-Gapped Report CSP & Binary Mitigations**: Self-contained HTML reports enforce `Content-Security-Policy: default-src 'none'; ...`, Windows `x86_64` MSVC release builds combine `/STACK:16777216`, Control Flow Guard (`-C control-flow-guard=on`), and CET Shadow Stack (`/CETCOMPAT`), and release archives ship `SBOM-crates.txt`.
 
 ## License
