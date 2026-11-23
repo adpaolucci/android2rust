@@ -61,6 +61,10 @@ where
                 );
                 std::process::exit(0);
             }
+            "--version" | "-V" => {
+                println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             other
                 if !other.starts_with('-') && other.to_ascii_lowercase().ends_with(".a2r") && out.recipe.is_none() =>
             {

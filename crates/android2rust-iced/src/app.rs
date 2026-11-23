@@ -7,7 +7,7 @@ use android2rust_core::{
     AndroidJob, AndroidOperation, JobPreset, ProfileStore, RunHistoryEntry, SavedProfile, ScheduleSpec, ToolFamily,
     TransportMode, ValidationFinding, ValidationSeverity, build_batch_script, build_powershell_script,
     build_shell_script, builtin_presets, format_command_line, parse_command_line, parse_recipe, quote_windows_arg,
-    serialize_recipe, tokenize_windows_cmdline, validate_job,
+    read_recipe_bounded, serialize_recipe, tokenize_windows_cmdline, validate_job,
 };
 use android2rust_report::{ReportFormat, write_report};
 use android2rust_runner::{
@@ -109,10 +109,7 @@ impl App {
         };
 
         if let Some(recipe_path) = &launch.recipe {
-            match std::fs::read(recipe_path)
-                .map_err(anyhow::Error::from)
-                .and_then(|b| parse_recipe(&b))
-            {
+            match read_recipe_bounded(recipe_path).and_then(|b| parse_recipe(&b)) {
                 Ok((parsed, _)) => {
                     job = parsed;
                     status_msg = format!("Loaded .a2r recipe: {}", recipe_path.display());
@@ -669,11 +666,16 @@ impl App {
                     .set_title("Import .a2r Recipe File")
                     .add_filter("Android2Rust Recipe", &["a2r", "json"])
                     .pick_file()
-                    && let Ok(bytes) = std::fs::read(&path)
-                    && let Ok((parsed, _)) = parse_recipe(&bytes)
                 {
-                    self.set_job(parsed);
-                    self.status_message = format!("Imported recipe: {}", path.display());
+                    match read_recipe_bounded(&path).and_then(|b| parse_recipe(&b)) {
+                        Ok((parsed, _)) => {
+                            self.set_job(parsed);
+                            self.status_message = format!("Imported recipe: {}", path.display());
+                        }
+                        Err(e) => {
+                            self.status_message = format!("Failed importing recipe: {e}");
+                        }
+                    }
                 }
             }
             Message::ExportRecipeFile => {

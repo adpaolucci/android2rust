@@ -5,10 +5,10 @@ Thank you for your interest in contributing to `android2rust`!
 ## Code Architecture
 
 The workspace is organized into 7 modular crates:
-- `crates/android2rust-core`: Job schema, Windows/POSIX quoting & command builder, bidirectional CLI & `.a2r` recipe parsers, validation rules, Android/ADB/Fastboot status decoder, pure-Rust offline forensic parsers (`.apk`, `.ab`, SQLite `.db`, `shared_prefs` XML, `logcat`/`getprop`), built-in presets, and persistent profile/history store.
-- `crates/android2rust-runner`: Android Platform-Tools environment detector (`adb` & `fastboot`), real-time streaming executor (`CREATE_NO_WINDOW` on Windows), stateful ADB/Fastboot output parser, dry-run simulator, offline forensic runner, and SHA-256 log hashing.
-- `crates/android2rust-report`: Self-contained offline HTML, JSON, and Markdown audit report generators plus direct `.apk`/`.ab`/`.db`/log importer.
-- `crates/android2rust-mcp`: Model Context Protocol (MCP) JSON-RPC 2.0 `stdio` server (`android2rust-mcp`).
+- `crates/android2rust-core`: Job schema, Windows/POSIX quoting & command builder, bidirectional CLI & `.a2r` recipe parsers, validation rules, Android/ADB/Fastboot status decoder, pure-Rust offline forensic parsers (`.apk` AXML/ABX\0/`Sig Block 42`, `bugreport.zip`, encrypted `.ab` PBKDF2/AES-256-CBC decryption, SQLite `.db`, `shared_prefs` XML, `logcat`/`getprop`), built-in presets, and persistent profile/history store.
+- `crates/android2rust-runner`: Android Platform-Tools environment detector (`adb` & `fastboot`), real-time streaming executor (`CREATE_NO_WINDOW` on Windows), stateful ADB/Fastboot output parser, dry-run simulator, offline forensic runner, and dual SHA-256 + SHA-512 log/artifact hashing.
+- `crates/android2rust-report`: Self-contained offline HTML, JSON, Markdown, and chronological timeline CSV/JSONL audit report generators plus direct `.apk`/`.ab`/`.db`/`bugreport.zip`/log importer.
+- `crates/android2rust-mcp`: Model Context Protocol (MCP) JSON-RPC 2.0 `stdio` server exposing 10 tools (`android2rust-mcp`).
 - `crates/android2rust-cli`: Unified command-line interface binary (`android2rust`) that launches `android2rust-win32` (Windows default) or `android2rust-iced` (Linux/macOS or `--iced`) when invoked with no arguments.
 - `crates/android2rust-win32`: Native zero-GPU Win32 desktop console built on `winsafe` (`android2rust-win32`).
 - `crates/android2rust-iced`: Cross-platform retained-mode desktop console built on `iced` (`android2rust-iced`).

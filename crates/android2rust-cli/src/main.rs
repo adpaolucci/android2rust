@@ -5,7 +5,7 @@ use android2rust_core::{
     AndroidJob, AndroidOperation, CaseMetadata, ForensicOptions, ProfileStore, RunHistoryEntry, ScheduleSpec,
     ToolFamily, ValidationSeverity, build_batch_script, build_powershell_script, build_schtasks_command,
     build_shell_script, builtin_presets, decode_status_code, find_preset, format_command_line, init_logging,
-    parse_command_line, parse_recipe, serialize_recipe, validate_job,
+    parse_command_line, parse_recipe, read_recipe_bounded, serialize_recipe, validate_job,
 };
 use android2rust_report::{ReportFormat, parse_log_file_with_options, write_report, write_timeline};
 use android2rust_runner::{
@@ -86,9 +86,16 @@ pub enum Commands {
         json: bool,
     },
     /// Start the Model Context Protocol (MCP) JSON-RPC 2.0 stdio server
-    Mcp,
+    Mcp(McpArgs),
     /// Launch the desktop GUI (`android2rust-win32` on Windows, `android2rust-iced` on Linux/macOS or with `--iced`)
     Gui(GuiArgs),
+}
+
+#[derive(Args, Debug, Default)]
+pub struct McpArgs {
+    /// Print available MCP tools in JSON Schema format and exit
+    #[arg(long)]
+    pub tools: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -337,26 +344,6 @@ pub struct GuiArgs {
 
     #[arg(long)]
     pub profile: Option<String>,
-}
-
-const MAX_RECIPE_BYTES: usize = 4 * 1024 * 1024;
-
-fn read_recipe_bounded(path: &Path) -> Result<Vec<u8>> {
-    let mut file = std::fs::File::open(path).with_context(|| format!("Failed to read {}", path.display()))?;
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(
-        &mut std::io::Read::take(&mut file, (MAX_RECIPE_BYTES + 1) as u64),
-        &mut out,
-    )
-    .with_context(|| format!("Failed to read {}", path.display()))?;
-    if out.len() > MAX_RECIPE_BYTES {
-        bail!(
-            "Recipe file {} exceeds maximum allowed size ({} MiB).",
-            path.display(),
-            MAX_RECIPE_BYTES / (1024 * 1024)
-        );
-    }
-    Ok(out)
 }
 
 fn merge_provenance_and_password(job: &mut AndroidJob, prov: &ProvenanceArgs, password: Option<&str>) {
@@ -926,7 +913,12 @@ fn run_cli(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Commands::Mcp => {
+        Commands::Mcp(args) => {
+            if args.tools {
+                let manifest = android2rust_mcp::get_tools_manifest();
+                println!("{}", serde_json::to_string_pretty(&manifest)?);
+                return Ok(0);
+            }
             android2rust_mcp::run_stdio_server().map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(0)
         }

@@ -5,7 +5,7 @@ use android2rust_core::format::{format_bytes, format_duration};
 use android2rust_core::{
     AndroidJob, AndroidOperation, RebootTarget, RunHistoryEntry, ScheduleCadence, ScheduleSpec, TransportMode,
     ValidationSeverity, build_batch_script, build_powershell_script, build_schtasks_command, build_shell_script,
-    decode_status_code, parse_command_line, parse_recipe, serialize_recipe,
+    decode_status_code, parse_command_line, parse_recipe, read_recipe_bounded, serialize_recipe,
 };
 use android2rust_report::{ReportFormat, write_report};
 use android2rust_runner::{RunResult, RunnerEvent, spawn_job_runner};
@@ -2176,10 +2176,7 @@ impl Win32App {
             "Import Android2Rust Recipe (.a2r)",
             &[("Android2Rust Recipe (*.a2r)", "*.a2r"), ("All Files", "*.*")],
         ) {
-            match std::fs::read(&path)
-                .map_err(anyhow::Error::from)
-                .and_then(|b| parse_recipe(&b))
-            {
+            match read_recipe_bounded(&path).and_then(|b| parse_recipe(&b)) {
                 Ok((job, warnings)) => {
                     {
                         let mut st = self.state.lock().unwrap();

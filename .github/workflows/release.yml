@@ -153,6 +153,7 @@ jobs:
           find release-artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec cp {} dist/ \;
           cd dist
           sha256sum * > SHA256SUMS.txt
+          find ../release-artifacts -type f -name "*.sha256" -exec cp {} . \;
           cat SHA256SUMS.txt
 
       - name: Determine Tag Name

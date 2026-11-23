@@ -1,6 +1,22 @@
 {
   "name": "Android2Rust Management & Forensics Console",
+  "version": "0.1.0",
   "description": "100% pure-Rust native Win32 (WinSafe) & cross-platform Iced ADB/Fastboot GUI wrapper, device orchestrator, offline Android forensics workstation, CLI, and MCP server.",
+  "repository": "https://github.com/adpaolucci/android2rust",
+  "homepage": "https://android2rust.guap.ca",
+  "license": "Apache-2.0",
+  "binaries": [
+    "android2rust",
+    "android2rust-win32",
+    "android2rust-iced",
+    "android2rust-mcp"
+  ],
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": [
+    "ADB & Fastboot command builder, parser, and live streaming runner",
+    "Offline DFIR forensics (.apk AXML/ABX0, bugreport.zip, encrypted .ab PBKDF2/AES-256-CBC, SQLite .db)",
+    "Dual SHA-256 + SHA-512 chain-of-custody & timeline CSV/JSONL exports",
+    "Native Win32 (WinSafe) & Iced 0.14 dual GUIs",
+    "10-tool MCP JSON-RPC stdio server with destructive safety guards"
+  ]
 }

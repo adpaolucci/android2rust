@@ -506,7 +506,7 @@ pub fn handle_jsonrpc_request(req: &Value) -> Option<Value> {
     debug!(method, "Received MCP JSON-RPC request");
 
     match method {
-        "notifications/initialized" | "notifications/cancelled" => None,
+        m if m.starts_with("notifications/") => None,
         "ping" => Some(json!({
             "jsonrpc": "2.0",
             "id": id,

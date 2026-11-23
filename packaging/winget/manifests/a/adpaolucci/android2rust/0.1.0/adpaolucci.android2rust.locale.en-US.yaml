@@ -14,10 +14,11 @@ Copyright: Copyright (c) 2026 adpaolucci
 ShortDescription: 100% pure-Rust native Win32 (WinSafe) & Iced ADB/Fastboot GUI wrapper, offline Android forensics workstation, CLI, and MCP server.
 Description: >-
   android2rust is a pure-Rust suite wrapping Android Platform-Tools (adb and fastboot) alongside pure-Rust offline
-  forensic inspection (.apk, .ab, SQLite .db, shared_prefs XML, logcat/getprop) with a native zero-GPU Win32 desktop
-  console (android2rust-win32 via WinSafe), a cross-platform Iced GUI (android2rust-iced), a 12-subcommand CLI
-  orchestrator, air-gapped HTML/JSON/Markdown audit reporting, .a2r/.bat/.ps1/.sh/schtasks exports, and a JSON-RPC 2.0
-  stdio MCP server.
+  forensic inspection (.apk, AXML/ABX\0 manifests, bugreport.zip, encrypted .ab PBKDF2/AES-256-CBC decryption, SQLite
+  .db, shared_prefs XML, logcat/getprop, dual SHA-256 + SHA-512 digests) with a native zero-GPU Win32 desktop console
+  (android2rust-win32 via WinSafe), a cross-platform Iced GUI (android2rust-iced), a 12-subcommand CLI orchestrator,
+  air-gapped HTML/JSON/Markdown and timeline CSV/JSONL audit reporting, .a2r/.bat/.ps1/.sh/schtasks exports, and a
+  10-tool JSON-RPC 2.0 stdio MCP server.
 Moniker: android2rust
 Tags:
   - android

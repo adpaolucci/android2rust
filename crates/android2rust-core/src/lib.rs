@@ -26,6 +26,6 @@ pub use model::{
 pub use parser::{ParseResult, parse_command_line, tokenize_windows_cmdline};
 pub use presets::{JobPreset, builtin_presets, find_preset};
 pub use profiles::{ProfileStore, RunHistoryEntry, SavedProfile};
-pub use recipe::{parse_recipe, serialize_recipe};
+pub use recipe::{MAX_RECIPE_BYTES, parse_recipe, read_recipe_bounded, serialize_recipe};
 pub use status_code::{StatusCodeInfo, StatusSeverity, decode_exit_code, decode_status_code};
 pub use validation::{ValidationFinding, ValidationSeverity, validate_job};

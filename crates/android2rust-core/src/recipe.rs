@@ -1,5 +1,37 @@
 use crate::model::{AndroidJob, AndroidOperation, ToolFamily, TransportMode};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use std::io::Read;
+use std::path::Path;
+
+/// Maximum permitted `.a2r` recipe file size (4 MiB).
+pub const MAX_RECIPE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Reads an `.a2r` recipe file while enforcing [`MAX_RECIPE_BYTES`].
+pub fn read_recipe_bounded(path: &Path) -> Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    if let Ok(meta) = file.metadata()
+        && meta.len() > MAX_RECIPE_BYTES as u64
+    {
+        bail!(
+            "Recipe file {} exceeds maximum allowed size ({} MiB).",
+            path.display(),
+            MAX_RECIPE_BYTES / (1024 * 1024)
+        );
+    }
+    let mut out = Vec::new();
+    (&mut file)
+        .take((MAX_RECIPE_BYTES + 1) as u64)
+        .read_to_end(&mut out)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    if out.len() > MAX_RECIPE_BYTES {
+        bail!(
+            "Recipe file {} exceeds maximum allowed size ({} MiB).",
+            path.display(),
+            MAX_RECIPE_BYTES / (1024 * 1024)
+        );
+    }
+    Ok(out)
+}
 
 /// Serializes an [`AndroidJob`] to a portable `.a2r` recipe JSON document.
 pub fn serialize_recipe(job: &AndroidJob) -> String {

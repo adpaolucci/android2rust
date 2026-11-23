@@ -1,5 +1,11 @@
 # Security Policy
 
+## Supported Versions
+
+| Version | Supported |
+| :--- | :--- |
+| `0.1.x` | :white_check_mark: |
+
 Command-line safety, path quoting integrity, and explicit guards around destructive Android operations (`fastboot flash`, `fastboot erase`, `fastboot format`, `fastboot flashing unlock`, `adb uninstall`, `adb restore`, and destructive shell commands) are top priorities for `android2rust`.
 
 If you discover a security vulnerability, command-injection/quoting edge case, or destructive guard bypass:

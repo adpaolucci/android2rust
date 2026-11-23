@@ -1,7 +1,7 @@
 use android2rust_core::{
     AndroidJob, JobPreset, ProfileStore, RunHistoryEntry, SavedProfile, ToolFamily, ValidationFinding,
     ValidationSeverity, builtin_presets, format_command_line, parse_recipe, quote_windows_arg,
-    tokenize_windows_cmdline, validate_job,
+    read_recipe_bounded, tokenize_windows_cmdline, validate_job,
 };
 use android2rust_runner::{CancelToken, EnvironmentInfo, FileActionRecord, RunResult, RunSummary, detect_environment};
 use std::collections::VecDeque;
@@ -106,10 +106,7 @@ impl Win32State {
         };
 
         if let Some(recipe_path) = &launch.recipe {
-            match std::fs::read(recipe_path)
-                .map_err(anyhow::Error::from)
-                .and_then(|b| parse_recipe(&b))
-            {
+            match read_recipe_bounded(recipe_path).and_then(|b| parse_recipe(&b)) {
                 Ok((parsed, _)) => {
                     job = parsed;
                     status = format!("Loaded .a2r: {}", recipe_path.display());
