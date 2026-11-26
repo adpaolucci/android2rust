@@ -5,9 +5,9 @@ Part of the **GUAP** Ecosystem (`guap.ca`) • [**Project Hub & Web Documentatio
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/adpaolucci/android2rust/actions/workflows/ci.yml/badge.svg)](https://github.com/adpaolucci/android2rust/actions/workflows/ci.yml)
 [![Rust: 2024](https://img.shields.io/badge/Rust-2024%20(1.89%2B)-orange.svg)](Cargo.toml)
-[![Architecture: 7 Crates](https://img.shields.io/badge/Workspace-7%20Crates-emerald.svg)](Cargo.toml)
+[![Architecture: 8 Crates](https://img.shields.io/badge/Workspace-8%20Crates-emerald.svg)](Cargo.toml)
 [![GUI: WinSafe Win32 + Iced 0.14](https://img.shields.io/badge/GUI-WinSafe%20Win32%20%2B%20Iced%200.14-cyan.svg)](crates/android2rust-win32)
-[![MCP: stdio JSON-RPC](https://img.shields.io/badge/MCP-stdio%20JSON--RPC%202.0-purple.svg)](crates/android2rust-mcp)
+[![MCP: stdio JSON-RPC](https://img.shields.io/badge/MCP-stdio%20JSON--RPC%202.0%20(13%20Tools)-purple.svg)](crates/android2rust-mcp)
 
 **Ready-to-submit WinGet & Homebrew manifests live in [`packaging/`](packaging/README.md).**
 
@@ -29,7 +29,7 @@ Zero Electron, zero WebView2, zero Node.js, and zero Java/Python runtime overhea
 | **Bidirectional `.a2r` & CLI Parser** | **Paste any `adb` / `fastboot` command or import `.a2r` recipes back into GUI** | Manual CLI recall | Static button wrappers | None |
 | **Destructive Operation Guards** | **Mandatory Dry-Run pre-flight & explicit guard on `flash` / `erase` / `format` / `unlock` / `uninstall` / `restore`** | Immediate execution | Basic prompts | Manual confirmation |
 | **Live Telemetry & Reports** | **Parsed device/package/prop/logcat records, dual SHA-256 + SHA-512 custody, case provenance, air-gapped HTML/JSON/MD + CSV/JSONL timelines** | Plain text stream | Raw terminal pane | Plain log redirection |
-| **AI Agent Integration** | **Native `stdio` MCP Server (`android2rust-mcp`, 10 tools)** | None | None | None |
+| **AI Agent Integration** | **Native `stdio` MCP Server (`android2rust-mcp`, 13 tools)** | None | None | None |
 
 ---
 
@@ -37,16 +37,17 @@ Zero Electron, zero WebView2, zero Node.js, and zero Java/Python runtime overhea
 
 ```text
 android2rust/
-├── Cargo.toml                         # Workspace root manifest (7 modular crates)
+├── Cargo.toml                         # Workspace root manifest (8 modular crates)
 ├── mcp.json                           # Standard MCP server client configuration
 ├── crates/
 │   ├── android2rust-core/             # Job schema, quoting, CLI & .a2r parser, validator, status decoder, pure-Rust APK/.ab/SQLite forensics, presets, profiles
 │   ├── android2rust-runner/           # Platform-Tools probe (adb/fastboot), CREATE_NO_WINDOW streaming executor, dry-run & offline forensic runner, SHA-256
-│   ├── android2rust-report/           # Self-contained offline HTML, JSON, and Markdown audit reports + direct artifact/log importer
-│   ├── android2rust-mcp/              # Model Context Protocol (MCP) JSON-RPC 2.0 stdio server & standalone `android2rust-mcp` binary
-│   ├── android2rust-cli/              # Unified CLI (`android2rust`): presets, build, parse, decode, inspect, dry-run, run, profile, report, env, mcp, gui
-│   ├── android2rust-win32/            # Native zero-GPU Win32 desktop console on WinSafe 0.0.29 (`android2rust-win32`)
-│   └── android2rust-iced/             # Cross-platform Iced 0.14 desktop console (`android2rust-iced`: Linux, macOS, Windows)
+│   ├── android2rust-wpd/              # MobileFileSearch: Windows Portable Devices (WPD/MTP) enumerator, search, safe copy-out, guap-table & offline fixtures
+│   ├── android2rust-report/           # Self-contained offline HTML, JSON, and Markdown audit reports + guap-export adapter
+│   ├── android2rust-mcp/              # Model Context Protocol (MCP) JSON-RPC 2.0 stdio server (`android2rust-mcp`, 13 tools)
+│   ├── android2rust-cli/              # Unified CLI (`android2rust`): presets, build, parse, decode, inspect, dry-run, run, profile, report, env, mtp, mcp, gui
+│   ├── android2rust-win32/            # Native zero-GPU Win32 desktop console on WinSafe 0.0.29 (`android2rust-win32`) + guap-gui-win32
+│   └── android2rust-iced/             # Cross-platform Iced 0.14 desktop console (`android2rust-iced` + Mobile Search view via guap-gui-iced)
 └── .github/workflows/                 # Cross-platform CI (`fmt`, `clippy`, `test`, `release`) and GitHub Release packaging
 ```
 
@@ -105,6 +106,10 @@ android2rust run --preset fastboot-flash-image --source "C:\Images\boot.img" --t
 # Convert an existing log file or artifact into HTML, JSON, Markdown, or timeline reports
 android2rust report --log-file logcat.txt --output ./audit_bundle --format all --timeline events.jsonl
 
+# MobileFileSearch (WPD/MTP live devices or deterministic offline --source-dir fixture)
+android2rust mtp devices --json
+android2rust mtp search --source-dir .\wpd_fixture --format csv --output .\mobile_files.csv --json
+
 # Start the stdio MCP server
 android2rust mcp
 ```
@@ -113,7 +118,7 @@ android2rust mcp
 
 ## Model Context Protocol (`android2rust-mcp`)
 
-Add `mcp.json` to your MCP-compatible client (`command: "android2rust"`, `args: ["mcp"]`) to expose 10 structured tools:
+Add `mcp.json` to your MCP-compatible client (`command: "android2rust"`, `args: ["mcp"]`) to expose **13 structured tools**:
 
 1. `android2rust_environment` — Host OS, `adb` / `fastboot` binary paths & SDK detection
 2. `android2rust_presets` — Built-in ADB, Fastboot, and Forensic templates
@@ -125,6 +130,9 @@ Add `mcp.json` to your MCP-compatible client (`command: "android2rust"`, `args: 
 8. `android2rust_dry_run` — Safe non-destructive pre-flight simulation (with optional `ab_password`, `case_id`, `evidence_id`, `examiner`)
 9. `android2rust_run` — Live execution (with optional `ab_password`, `case_id`, `evidence_id`, `examiner`) and strict `confirm_destructive: true` refusal guard
 10. `android2rust_report` — Validated offline HTML / JSON / Markdown / Timeline CSV & JSONL audit generator
+11. `android2rust_wpd_devices` — Enumerate connected Windows Portable Devices (WPD/MTP) & storages (`readOnlyHint: true`)
+12. `android2rust_mobile_file_search` — Search WPD/MTP devices or offline fixtures with wildcard/regex/size/date filters (`readOnlyHint: true`)
+13. `android2rust_wpd_delete` — Policy-gated WPD/MTP file deletion (`-32003` enforced unless `AllowMutating` + `confirm_destructive: true`)
 
 ---
 
@@ -158,3 +166,5 @@ Informed by public forensic-parser vulnerability disclosures (such as Signal's A
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE) (see also [NOTICE](NOTICE)).
+
+Explore the full [**Project Wiki**](https://github.com/adpaolucci/android2rust/wiki) ([WPD/MTP Mobile File Search](https://github.com/adpaolucci/android2rust/wiki/WPD-MTP-Mobile-File-Search), [CLI Reference](https://github.com/adpaolucci/android2rust/wiki/CLI-Reference), [MCP Server Guide](https://github.com/adpaolucci/android2rust/wiki/MCP-Server-Guide)).
