@@ -4,8 +4,12 @@ use android2rust_core::{
     AndroidJob, AndroidOperation, CaseMetadata, ForensicReport, StatusCodeInfo, StatusSeverity, ToolFamily, build_args,
     decode_exit_code, decode_status_code, format_command_line, inspect_artifact, validate_job,
 };
+use android2rust_wpd::{
+    CopyOutOptions, DirectoryMtpSource, LiveWpdSource, MobileFileQuery, MtpDeviceSource, WpdError, copy_out,
+    search_devices,
+};
 use anyhow::{Context, Result, anyhow};
-use chrono::Utc;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use std::io::{BufReader, Read};
@@ -113,6 +117,7 @@ pub fn spawn_job_runner(job: AndroidJob, binary_override: Option<PathBuf>) -> (R
                 let (_, args) = build_args(&job);
                 let is_forensics =
                     job.operation == AndroidOperation::InspectArtifact || job.tool == ToolFamily::Forensics;
+                let is_wpd = job.operation == AndroidOperation::MobileFileSearch || job.tool == ToolFamily::Wpd;
                 let (exit_code, status_info) = if is_forensics {
                     (
                         1,
@@ -122,6 +127,19 @@ pub fn spawn_job_runner(job: AndroidJob, binary_override: Option<PathBuf>) -> (R
                             severity: StatusSeverity::Error,
                             is_success: false,
                             short_label: "1 (Forensic Inspection Error)".to_string(),
+                            summary: err_msg.clone(),
+                            details: vec![err_msg.clone()],
+                        },
+                    )
+                } else if is_wpd {
+                    (
+                        1,
+                        StatusCodeInfo {
+                            code: "1".to_string(),
+                            exit_code: Some(1),
+                            severity: StatusSeverity::Error,
+                            is_success: false,
+                            short_label: "1 (WPD/MTP Search Error)".to_string(),
                             summary: err_msg.clone(),
                             details: vec![err_msg.clone()],
                         },
@@ -204,6 +222,11 @@ fn execute_job_internal(
     // 2. Dry-Run Pre-Flight Simulation (never modifies connected Android hardware)
     if job.dry_run {
         return execute_dry_run_simulation(job, &args, &command_line, &started_at, timer, &mut emit);
+    }
+
+    // 2b. WPD / MTP MobileFileSearch (Windows COM or offline directory fixture)
+    if job.operation == AndroidOperation::MobileFileSearch || job.tool == ToolFamily::Wpd {
+        return execute_wpd_job(job, &args, &command_line, &started_at, timer, &mut emit);
     }
 
     // 3. Live ADB / Fastboot Execution
@@ -643,6 +666,237 @@ fn resolve_binary(job: &AndroidJob, override_path: Option<&Path>) -> Result<Path
         ToolFamily::Adb => find_adb_executable()
             .ok_or_else(|| anyhow!("Android Platform-Tools `adb` executable was not found on PATH or ANDROID_HOME.")),
         ToolFamily::Forensics => Err(anyhow!("Forensic inspection does not invoke an external binary.")),
+        ToolFamily::Wpd => Err(anyhow!(
+            "WPD/MTP uses native Windows COM and does not invoke an external binary."
+        )),
+    }
+}
+
+fn parse_optional_datetime(raw: Option<&str>) -> Result<Option<DateTime<Utc>>> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(Some(dt.with_timezone(&Utc)));
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        && let Some(ndt) = d.and_hms_opt(0, 0, 0)
+    {
+        return Ok(Some(ndt.and_utc()));
+    }
+    anyhow::bail!("Invalid date/timestamp '{s}'; expected RFC3339 or YYYY-MM-DD")
+}
+
+fn execute_wpd_job(
+    job: &AndroidJob,
+    args: &[String],
+    command_line: &str,
+    started_at: &str,
+    timer: Instant,
+    emit: &mut impl FnMut(RunnerEvent),
+) -> Result<RunResult> {
+    let mut query = MobileFileQuery {
+        device_filter: job.wpd_opts.device_filter.clone().filter(|s| !s.trim().is_empty()),
+        pattern: (!job.wpd_opts.pattern.trim().is_empty()).then(|| job.wpd_opts.pattern.clone()),
+        use_regex: job.wpd_opts.use_regex,
+        min_size: job.wpd_opts.min_size,
+        max_size: job.wpd_opts.max_size,
+        created_after: parse_optional_datetime(job.wpd_opts.created_after.as_deref())?,
+        created_before: parse_optional_datetime(job.wpd_opts.created_before.as_deref())?,
+        modified_after: parse_optional_datetime(job.wpd_opts.modified_after.as_deref())?,
+        modified_before: parse_optional_datetime(job.wpd_opts.modified_before.as_deref())?,
+        max_results: job.wpd_opts.max_results,
+        ..Default::default()
+    };
+    if let Some(m) = job
+        .wpd_opts
+        .mime_or_ext
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if m.contains('/') || m.contains('*') {
+            query.content_type = Some(m.to_string());
+        } else {
+            query.extension = Some(m.to_string());
+        }
+    }
+
+    let source_dir = job
+        .wpd_opts
+        .offline_source_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let s = job.source_path.trim();
+            if !s.is_empty() && Path::new(s).is_dir() {
+                Some(s)
+            } else {
+                None
+            }
+        });
+
+    let source: Box<dyn MtpDeviceSource> = if let Some(dir) = source_dir {
+        Box::new(DirectoryMtpSource::new(dir))
+    } else {
+        Box::new(LiveWpdSource::new())
+    };
+
+    let search_res = search_devices(source.as_ref(), &query);
+    match search_res {
+        Err(err @ (WpdError::NoDevices | WpdError::AccessDenied(_) | WpdError::UnsupportedPlatform)) => {
+            let code_tok = match &err {
+                WpdError::NoDevices => "NO_WPD_DEVICES",
+                WpdError::AccessDenied(_) => "WPD_ACCESS_DENIED",
+                WpdError::UnsupportedPlatform => "WPD_UNSUPPORTED_PLATFORM",
+                _ => "1",
+            };
+            let err_msg = err.to_string();
+            emit(RunnerEvent::Error(err_msg.clone()));
+            let mut status_info = decode_status_code(code_tok);
+            status_info.exit_code = Some(1);
+            let mut h256 = Sha256::new();
+            h256.update(err_msg.as_bytes());
+            let mut h512 = Sha512::new();
+            h512.update(err_msg.as_bytes());
+            Ok(RunResult {
+                job_name: job.name.clone(),
+                tool: ToolFamily::Wpd,
+                operation: AndroidOperation::MobileFileSearch,
+                source: source_dir.unwrap_or("live://wpd").to_string(),
+                destination: job.target_path.clone(),
+                dry_run: false,
+                command_line: command_line.to_string(),
+                args: args.to_vec(),
+                started_at: started_at.to_string(),
+                ended_at: Utc::now().to_rfc3339(),
+                duration_secs: timer.elapsed().as_secs_f64(),
+                exit_code: 1,
+                status_info,
+                cancelled: false,
+                summary: RunSummary {
+                    errors_seen: 1,
+                    log_lines_seen: 1,
+                    ..Default::default()
+                },
+                file_actions: Vec::new(),
+                forensic_report: None,
+                errors: vec![err_msg.clone()],
+                log_lines: vec![err_msg],
+                log_sha256: android2rust_core::format::encode_hex_lower(&h256.finalize()),
+                log_sha512: android2rust_core::format::encode_hex_lower(&h512.finalize()),
+                case_meta: job.forensic_opts.case_meta.clone(),
+            })
+        }
+        Err(err) => Err(anyhow!("{err}")),
+        Ok(entries) => {
+            let mut log_lines = Vec::with_capacity(entries.len() + 4);
+            let mut file_actions = Vec::with_capacity(entries.len());
+            let mut total_bytes = 0u64;
+
+            log_lines.push(format!(
+                "WPD/MTP MobileFileSearch matched {} object(s) from {}.",
+                entries.len(),
+                source_dir.unwrap_or("live WPD/MTP devices")
+            ));
+
+            for e in &entries {
+                total_bytes = total_bytes.saturating_add(e.size_bytes);
+                let rec = FileActionRecord {
+                    kind: FileActionKind::Wpd,
+                    path: format!("{}/{}{}", e.device_name, e.storage_name, e.full_path),
+                    detail: format!("{} ({} bytes, id={})", e.content_type, e.size_bytes, e.object_id),
+                    size_bytes: Some(e.size_bytes),
+                    timestamp: e.modified_time.map(|t| t.to_rfc3339()),
+                };
+                emit(RunnerEvent::FileAction(rec.clone()));
+                file_actions.push(rec);
+                log_lines.push(format!(
+                    "[WPD] {} | {} | {} bytes | {}",
+                    e.device_name, e.full_path, e.size_bytes, e.content_type
+                ));
+            }
+
+            let copy_dir = job
+                .wpd_opts
+                .copy_out_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    let t = job.target_path.trim();
+                    if t.is_empty() { None } else { Some(t) }
+                });
+            let mut files_transferred = 0u64;
+            if let Some(out_dir) = copy_dir {
+                let copied = copy_out(
+                    source.as_ref(),
+                    &entries,
+                    Path::new(out_dir),
+                    &CopyOutOptions::default(),
+                )
+                .map_err(|e| anyhow!("WPD copy-out failed: {e}"))?;
+                files_transferred = copied.len() as u64;
+                for c in copied {
+                    log_lines.push(format!(
+                        "[COPY-OUT] {} -> {} ({} bytes)",
+                        c.source_path,
+                        c.destination_path.display(),
+                        c.bytes_written
+                    ));
+                }
+            }
+
+            for line in &log_lines {
+                emit(RunnerEvent::LogLine(line.clone()));
+            }
+            emit(RunnerEvent::Progress {
+                percent: 100.0,
+                current_file: None,
+            });
+            let summary = RunSummary {
+                files_transferred,
+                bytes_processed: total_bytes,
+                log_lines_seen: log_lines.len() as u64,
+                ..Default::default()
+            };
+            emit(RunnerEvent::Summary(summary.clone()));
+
+            let mut h256 = Sha256::new();
+            let mut h512 = Sha512::new();
+            for l in &log_lines {
+                h256.update(l.as_bytes());
+                h256.update(b"\n");
+                h512.update(l.as_bytes());
+                h512.update(b"\n");
+            }
+
+            Ok(RunResult {
+                job_name: job.name.clone(),
+                tool: ToolFamily::Wpd,
+                operation: AndroidOperation::MobileFileSearch,
+                source: source_dir.unwrap_or("live://wpd").to_string(),
+                destination: copy_dir.unwrap_or("").to_string(),
+                dry_run: false,
+                command_line: command_line.to_string(),
+                args: args.to_vec(),
+                started_at: started_at.to_string(),
+                ended_at: Utc::now().to_rfc3339(),
+                duration_secs: timer.elapsed().as_secs_f64(),
+                exit_code: 0,
+                status_info: decode_exit_code(0),
+                cancelled: false,
+                summary,
+                file_actions,
+                forensic_report: None,
+                errors: Vec::new(),
+                log_lines,
+                log_sha256: android2rust_core::format::encode_hex_lower(&h256.finalize()),
+                log_sha512: android2rust_core::format::encode_hex_lower(&h512.finalize()),
+                case_meta: job.forensic_opts.case_meta.clone(),
+            })
+        }
     }
 }
 
@@ -759,5 +1013,38 @@ mod tests {
         let err_res = finished.unwrap();
         assert_eq!(err_res.exit_code, 1);
         assert!(err_res.status_info.short_label.contains("Forensic Inspection Error"));
+    }
+
+    #[test]
+    fn executes_wpd_mobile_file_search_fixture_and_dry_run() {
+        let tmp = TempDir::new().unwrap();
+        let fixture = tmp.path().join("fixture");
+        let dcim = fixture.join("DCIM");
+        let copy_dest = tmp.path().join("copied");
+        std::fs::create_dir_all(&dcim).unwrap();
+        std::fs::write(dcim.join("IMG_01.jpg"), b"jpgdata").unwrap();
+        std::fs::write(dcim.join("readme.txt"), b"txtdata").unwrap();
+
+        let mut dry = AndroidJob {
+            name: "Dry WPD Search".to_string(),
+            tool: ToolFamily::Wpd,
+            operation: AndroidOperation::MobileFileSearch,
+            dry_run: true,
+            ..Default::default()
+        };
+        dry.wpd_opts.offline_source_dir = Some(fixture.display().to_string());
+        dry.wpd_opts.pattern = "*.jpg".to_string();
+        let dry_res = run_job_blocking(&dry, None, &CancelToken::new()).unwrap();
+        assert!(dry_res.dry_run);
+        assert_eq!(dry_res.exit_code, 0);
+
+        let mut live_fixture = dry.clone();
+        live_fixture.dry_run = false;
+        live_fixture.wpd_opts.copy_out_dir = Some(copy_dest.display().to_string());
+        let res = run_job_blocking(&live_fixture, None, &CancelToken::new()).unwrap();
+        assert_eq!(res.exit_code, 0);
+        assert_eq!(res.file_actions.len(), 1);
+        assert_eq!(res.summary.files_transferred, 1);
+        assert!(copy_dest.join("DCIM").join("IMG_01.jpg").is_file());
     }
 }

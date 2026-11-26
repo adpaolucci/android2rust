@@ -4,6 +4,7 @@ use android2rust_core::{
     tokenize_windows_cmdline, validate_job,
 };
 use android2rust_runner::{CancelToken, EnvironmentInfo, FileActionRecord, RunResult, RunSummary, detect_environment};
+use android2rust_wpd::{WpdDeviceInfo, WpdObjectEntry};
 use std::collections::VecDeque;
 
 pub const MAX_LOG_LINES: usize = 25_000;
@@ -87,6 +88,13 @@ pub struct Win32State {
     pub batch_stop_on_error: bool,
     pub active_batch_idx: Option<usize>,
 
+    pub wpd_use_live: bool,
+    pub wpd_fixture_dir: String,
+    pub wpd_devices: Vec<WpdDeviceInfo>,
+    pub wpd_results: Vec<WpdObjectEntry>,
+    pub wpd_status: String,
+    pub wpd_scanning: bool,
+
     pub status_message: String,
 }
 
@@ -157,6 +165,13 @@ impl Win32State {
             batch_dry_run: false,
             batch_stop_on_error: true,
             active_batch_idx: None,
+            wpd_use_live: true,
+            wpd_fixture_dir: String::new(),
+            wpd_devices: Vec::new(),
+            wpd_results: Vec::new(),
+            wpd_status: "Ready — click Scan / Search for live WPD/MTP devices or select an Offline Directory Fixture."
+                .to_string(),
+            wpd_scanning: false,
             status_message: status,
         };
         st.refresh_derived();
@@ -262,5 +277,8 @@ mod tests {
         assert_eq!(st.job.fastboot_opts.partition, "init_boot");
         assert!(st.job.is_destructive());
         assert!(st.cached_command.contains("flash init_boot boot.img"));
+        assert!(st.wpd_use_live);
+        assert!(st.wpd_results.is_empty());
+        assert!(!st.wpd_scanning);
     }
 }

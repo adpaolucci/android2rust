@@ -1,6 +1,7 @@
 use crate::LaunchArgs;
 use crate::message::{
     ActionFilter, ActiveModal, BatchItemStatus, BatchQueueItem, ConsoleSubTab, Message, TransportChoice, WorkspaceTab,
+    WpdSourceMode,
 };
 use crate::views;
 use android2rust_core::{
@@ -9,12 +10,17 @@ use android2rust_core::{
     build_shell_script, builtin_presets, format_command_line, parse_command_line, parse_recipe, quote_windows_arg,
     read_recipe_bounded, serialize_recipe, tokenize_windows_cmdline, validate_job,
 };
-use android2rust_report::{ReportFormat, write_report};
+use android2rust_report::{ReportFormat, export_wpd_results, write_report};
 use android2rust_runner::{
     CancelToken, EnvironmentInfo, FileActionRecord, RunResult, RunSummary, RunnerEvent, detect_environment,
     spawn_job_runner,
 };
-use chrono::Utc;
+use android2rust_wpd::{
+    CopyOutOptions, DirectoryMtpSource, LiveWpdSource, MobileFileQuery, MobileFileSearchProvider, MtpDeviceSource,
+    WpdDeviceInfo, WpdObjectEntry, copy_out, entries_to_table_data, search_devices,
+};
+use chrono::{DateTime, NaiveDate, Utc};
+use guap_table::{SortDirection, TableData, TableProvider, TableQuery};
 use iced::widget::{button, column, container, mouse_area, pick_list, row, rule, space, stack, text, text_input};
 use iced::{Alignment, Color, Element, Font, Length, Subscription, Task, Theme};
 use std::collections::VecDeque;
@@ -89,6 +95,27 @@ pub struct App {
     pub task_sched_target: String,
     pub task_sched_spec: ScheduleSpec,
     pub status_code_input: String,
+
+    // WPD / MobileFileSearch
+    pub wpd_source_mode: WpdSourceMode,
+    pub wpd_fixture_dir: String,
+    pub wpd_device_filter: String,
+    pub wpd_pattern: String,
+    pub wpd_use_regex: bool,
+    pub wpd_min_size: String,
+    pub wpd_max_size: String,
+    pub wpd_created_after: String,
+    pub wpd_modified_after: String,
+    pub wpd_mime_filter: String,
+    pub wpd_max_results: String,
+    pub wpd_scanning: bool,
+    pub wpd_devices: Vec<WpdDeviceInfo>,
+    pub wpd_results: Vec<WpdObjectEntry>,
+    pub wpd_table_data: TableData,
+    pub wpd_sort_col: Option<usize>,
+    pub wpd_sort_dir: SortDirection,
+    pub wpd_selected_row: Option<usize>,
+    pub wpd_status: String,
 
     pub status_message: String,
 }
@@ -193,6 +220,27 @@ impl App {
             task_sched_target: String::new(),
             task_sched_spec: ScheduleSpec::default(),
             status_code_input: "DEVICE_UNAUTHORIZED".to_string(),
+
+            wpd_source_mode: WpdSourceMode::LiveWpd,
+            wpd_fixture_dir: String::new(),
+            wpd_device_filter: String::new(),
+            wpd_pattern: String::new(),
+            wpd_use_regex: false,
+            wpd_min_size: String::new(),
+            wpd_max_size: String::new(),
+            wpd_created_after: String::new(),
+            wpd_modified_after: String::new(),
+            wpd_mime_filter: String::new(),
+            wpd_max_results: "2000".to_string(),
+            wpd_scanning: false,
+            wpd_devices: Vec::new(),
+            wpd_results: Vec::new(),
+            wpd_table_data: entries_to_table_data(&[]),
+            wpd_sort_col: None,
+            wpd_sort_dir: SortDirection::Asc,
+            wpd_selected_row: None,
+            wpd_status: "Ready — click 'Search WPD' for live WPD/MTP devices or select an Offline Directory Fixture."
+                .to_string(),
 
             status_message: status_msg,
         };
@@ -1038,6 +1086,226 @@ impl App {
                 self.run_history.clear();
                 self.selected_history_idx = None;
             }
+
+            // WPD / MobileFileSearch
+            Message::WpdSourceModeChanged(m) => self.wpd_source_mode = m,
+            Message::WpdFixtureDirChanged(s) => self.wpd_fixture_dir = s,
+            Message::WpdBrowseFixtureDir => {
+                if let Some(dir) = pick_folder_dialog(&self.wpd_fixture_dir, "Select Offline Synthetic MTP Fixture") {
+                    self.wpd_fixture_dir = dir.display().to_string();
+                    self.wpd_source_mode = WpdSourceMode::OfflineDirectory;
+                }
+            }
+            Message::WpdDeviceFilterChanged(s) => self.wpd_device_filter = s,
+            Message::WpdPatternChanged(s) => self.wpd_pattern = s,
+            Message::WpdToggleRegex(v) => self.wpd_use_regex = v,
+            Message::WpdMinSizeChanged(s) => self.wpd_min_size = s,
+            Message::WpdMaxSizeChanged(s) => self.wpd_max_size = s,
+            Message::WpdCreatedAfterChanged(s) => self.wpd_created_after = s,
+            Message::WpdModifiedAfterChanged(s) => self.wpd_modified_after = s,
+            Message::WpdMimeFilterChanged(s) => self.wpd_mime_filter = s,
+            Message::WpdMaxResultsChanged(s) => self.wpd_max_results = s,
+            Message::WpdListDevices => {
+                if self.wpd_scanning {
+                    return Task::none();
+                }
+                if self.wpd_source_mode == WpdSourceMode::OfflineDirectory && self.wpd_fixture_dir.trim().is_empty() {
+                    self.wpd_status = "Error: select an Offline Directory Fixture path first.".to_string();
+                    return Task::none();
+                }
+                self.wpd_scanning = true;
+                self.wpd_status = "Scanning WPD/MTP devices...".to_string();
+                let mode = self.wpd_source_mode;
+                let dir = self.wpd_fixture_dir.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let source: Box<dyn MtpDeviceSource> = match mode {
+                                WpdSourceMode::LiveWpd => Box::new(LiveWpdSource::new()),
+                                WpdSourceMode::OfflineDirectory => Box::new(DirectoryMtpSource::new(dir)),
+                            };
+                            source.list_devices().map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("WPD device scan task failed: {e}")))
+                    },
+                    Message::WpdDevicesFinished,
+                );
+            }
+            Message::WpdDevicesFinished(res) => {
+                self.wpd_scanning = false;
+                match res {
+                    Ok(devs) if devs.is_empty() => {
+                        self.wpd_devices.clear();
+                        self.wpd_status =
+                            "No WPD/MTP devices detected (connect phone in MTP mode or use Offline Directory Fixture)."
+                                .to_string();
+                    }
+                    Ok(devs) => {
+                        let names = devs
+                            .iter()
+                            .map(|d| d.friendly_name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        self.wpd_status = format!("Detected {} WPD/MTP device(s): {names}", devs.len());
+                        self.wpd_devices = devs;
+                    }
+                    Err(e) => {
+                        self.wpd_status = format!("WPD/MTP device scan: {e}");
+                    }
+                }
+            }
+            Message::WpdRunSearch => {
+                if self.wpd_scanning {
+                    return Task::none();
+                }
+                if self.wpd_source_mode == WpdSourceMode::OfflineDirectory && self.wpd_fixture_dir.trim().is_empty() {
+                    self.wpd_status = "Error: select an Offline Directory Fixture path first.".to_string();
+                    return Task::none();
+                }
+                let query = match self.build_wpd_query() {
+                    Ok(q) => q,
+                    Err(e) => {
+                        self.wpd_status = format!("Query error: {e}");
+                        return Task::none();
+                    }
+                };
+                self.wpd_scanning = true;
+                self.wpd_status = "Searching WPD/MTP objects...".to_string();
+                let mode = self.wpd_source_mode;
+                let dir = self.wpd_fixture_dir.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let source: Box<dyn MtpDeviceSource> = match mode {
+                                WpdSourceMode::LiveWpd => Box::new(LiveWpdSource::new()),
+                                WpdSourceMode::OfflineDirectory => Box::new(DirectoryMtpSource::new(dir)),
+                            };
+                            search_devices(source.as_ref(), &query).map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("WPD search task failed: {e}")))
+                    },
+                    Message::WpdSearchFinished,
+                );
+            }
+            Message::WpdSearchFinished(res) => {
+                self.wpd_scanning = false;
+                self.wpd_selected_row = None;
+                match res {
+                    Ok(entries) => {
+                        self.wpd_status = format!("Matched {} WPD/MTP object(s).", entries.len());
+                        self.wpd_results = entries;
+                        self.refresh_wpd_table();
+                    }
+                    Err(e) => {
+                        self.wpd_results.clear();
+                        self.refresh_wpd_table();
+                        self.wpd_status = format!("WPD/MTP search: {e}");
+                    }
+                }
+            }
+            Message::WpdSortColumn(col_idx) => {
+                if self.wpd_sort_col == Some(col_idx) {
+                    self.wpd_sort_dir = match self.wpd_sort_dir {
+                        SortDirection::Asc => SortDirection::Desc,
+                        SortDirection::Desc => SortDirection::Asc,
+                    };
+                } else {
+                    self.wpd_sort_col = Some(col_idx);
+                    self.wpd_sort_dir = SortDirection::Asc;
+                }
+                self.refresh_wpd_table();
+            }
+            Message::WpdSelectRow(idx) => self.wpd_selected_row = idx,
+            Message::WpdCopyOutSelected => {
+                if self.wpd_results.is_empty() || self.wpd_scanning {
+                    return Task::none();
+                }
+                let selected_entries = if let Some(idx) = self.wpd_selected_row {
+                    self.wpd_table_data
+                        .rows
+                        .get(idx)
+                        .and_then(|r| self.wpd_results.get(r.id as usize).cloned())
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                } else {
+                    self.wpd_results.clone()
+                };
+                if selected_entries.is_empty() {
+                    return Task::none();
+                }
+                let Some(dest_dir) = pick_folder_dialog("", "Select Destination Folder for WPD Copy-Out") else {
+                    return Task::none();
+                };
+                self.wpd_scanning = true;
+                self.wpd_status = format!(
+                    "Copying {} WPD/MTP file(s) to {}...",
+                    selected_entries.len(),
+                    dest_dir.display()
+                );
+                let mode = self.wpd_source_mode;
+                let dir = self.wpd_fixture_dir.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let source: Box<dyn MtpDeviceSource> = match mode {
+                                WpdSourceMode::LiveWpd => Box::new(LiveWpdSource::new()),
+                                WpdSourceMode::OfflineDirectory => Box::new(DirectoryMtpSource::new(dir)),
+                            };
+                            copy_out(
+                                source.as_ref(),
+                                &selected_entries,
+                                &dest_dir,
+                                &CopyOutOptions::default(),
+                            )
+                            .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("WPD copy-out task failed: {e}")))
+                    },
+                    Message::WpdCopyOutFinished,
+                );
+            }
+            Message::WpdCopyOutFinished(res) => {
+                self.wpd_scanning = false;
+                match res {
+                    Ok(recs) => {
+                        self.wpd_status = format!("Copied out {} file(s) safely.", recs.len());
+                        self.status_message = self.wpd_status.clone();
+                    }
+                    Err(e) => {
+                        self.wpd_status = format!("Copy-out error: {e}");
+                    }
+                }
+            }
+            Message::WpdExport(fmt) => {
+                if self.wpd_results.is_empty() {
+                    return Task::none();
+                }
+                let ext = fmt.extension();
+                let default_name = format!("mobile_file_search.{ext}");
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_title("Export MobileFileSearch Results")
+                    .set_file_name(&default_name)
+                    .add_filter(fmt.to_string(), &[ext])
+                    .save_file()
+                {
+                    match export_wpd_results(&self.wpd_results, fmt, &path) {
+                        Ok(manifest) => {
+                            self.wpd_status = format!(
+                                "Exported {} (Merkle SHA-256: {}...)",
+                                path.display(),
+                                &manifest.merkle_root_sha256[..16.min(manifest.merkle_root_sha256.len())]
+                            );
+                            self.status_message = self.wpd_status.clone();
+                        }
+                        Err(e) => {
+                            self.wpd_status = format!("Export error: {e}");
+                        }
+                    }
+                }
+            }
         }
         Task::none()
     }
@@ -1060,6 +1328,7 @@ impl App {
             WorkspaceTab::LiveConsole => views::live_console::view_live_console(self),
             WorkspaceTab::BatchQueue => views::batch_queue::view_batch_queue(self),
             WorkspaceTab::HistoryReports => views::history_view::view_history_view(self),
+            WorkspaceTab::MobileFileSearch => views::mobile_search::view_mobile_search(self),
         };
 
         let center = row![
@@ -1264,6 +1533,93 @@ impl App {
             .style(container::bordered_box)
             .into()
     }
+
+    fn build_wpd_query(&self) -> Result<MobileFileQuery, String> {
+        let min_size = if self.wpd_min_size.trim().is_empty() {
+            None
+        } else {
+            Some(
+                self.wpd_min_size
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| format!("Invalid min size '{}'", self.wpd_min_size.trim()))?,
+            )
+        };
+        let max_size = if self.wpd_max_size.trim().is_empty() {
+            None
+        } else {
+            Some(
+                self.wpd_max_size
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| format!("Invalid max size '{}'", self.wpd_max_size.trim()))?,
+            )
+        };
+        let max_results = if self.wpd_max_results.trim().is_empty() {
+            None
+        } else {
+            Some(
+                self.wpd_max_results
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| format!("Invalid max results '{}'", self.wpd_max_results.trim()))?,
+            )
+        };
+        let created_after = parse_iced_dt(&self.wpd_created_after)?;
+        let modified_after = parse_iced_dt(&self.wpd_modified_after)?;
+        let (content_type, extension) = if self.wpd_mime_filter.trim().is_empty() {
+            (None, None)
+        } else if self.wpd_mime_filter.contains('/') || self.wpd_mime_filter.contains('*') {
+            (Some(self.wpd_mime_filter.trim().to_string()), None)
+        } else {
+            (None, Some(self.wpd_mime_filter.trim().to_string()))
+        };
+        let q = MobileFileQuery {
+            device_filter: opt_nonempty(&self.wpd_device_filter),
+            pattern: opt_nonempty(&self.wpd_pattern),
+            use_regex: self.wpd_use_regex,
+            min_size,
+            max_size,
+            created_after,
+            modified_after,
+            content_type,
+            extension,
+            max_results,
+            ..Default::default()
+        };
+        q.validate().map_err(|e| e.to_string())?;
+        Ok(q)
+    }
+
+    fn refresh_wpd_table(&mut self) {
+        let provider = MobileFileSearchProvider::new(&self.wpd_results);
+        let sort = self
+            .wpd_sort_col
+            .map(|c| vec![(c, self.wpd_sort_dir)])
+            .unwrap_or_default();
+        if let Ok(td) = provider.query(&TableQuery {
+            sort,
+            ..Default::default()
+        }) {
+            self.wpd_table_data = td;
+        }
+    }
+}
+
+fn parse_iced_dt(raw: &str) -> Result<Option<DateTime<Utc>>, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(Some(dt.with_timezone(&Utc)));
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        && let Some(ndt) = d.and_hms_opt(0, 0, 0)
+    {
+        return Ok(Some(ndt.and_utc()));
+    }
+    Err(format!("Invalid timestamp '{s}'; expected RFC3339 or YYYY-MM-DD"))
 }
 
 fn pick_folder_dialog(current_input: &str, title: &str) -> Option<PathBuf> {
@@ -1404,5 +1760,43 @@ mod tests {
         assert_eq!(app.job.operation, AndroidOperation::InspectArtifact);
         assert!(app.cached_command.contains("--case-id IR-ICED-1"));
         assert!(app.is_running);
+    }
+
+    #[test]
+    fn mobile_file_search_tab_validates_query_and_populates_sorted_table() {
+        let (mut app, _) = App::new(LaunchArgs::default());
+        assert!(WorkspaceTab::all().contains(&WorkspaceTab::MobileFileSearch));
+        let _ = app.update(Message::SelectTab(WorkspaceTab::MobileFileSearch));
+        assert_eq!(app.active_tab, WorkspaceTab::MobileFileSearch);
+
+        // Invalid regex produces clear error without entering scanning state
+        let _ = app.update(Message::WpdToggleRegex(true));
+        let _ = app.update(Message::WpdPatternChanged("[unclosed".to_string()));
+        let _ = app.update(Message::WpdRunSearch);
+        assert!(!app.wpd_scanning);
+        assert!(app.wpd_status.contains("Query error"));
+
+        // Applying search results updates table and sorting works
+        let entry = WpdObjectEntry {
+            device_id: "d1".to_string(),
+            device_name: "Pixel".to_string(),
+            storage_name: "Internal".to_string(),
+            object_id: "o1".to_string(),
+            parent_id: "p0".to_string(),
+            full_path: "/DCIM/IMG_1.jpg".to_string(),
+            filename: "IMG_1.jpg".to_string(),
+            extension: "jpg".to_string(),
+            size_bytes: 2048,
+            created_time: None,
+            modified_time: None,
+            content_type: "image/jpeg".to_string(),
+            is_folder: false,
+            can_delete: false,
+        };
+        let _ = app.update(Message::WpdSearchFinished(Ok(vec![entry])));
+        assert_eq!(app.wpd_table_data.rows.len(), 1);
+        assert_eq!(app.wpd_table_data.schema.columns.len(), 10);
+        let _ = app.update(Message::WpdSortColumn(6));
+        assert_eq!(app.wpd_sort_col, Some(6));
     }
 }

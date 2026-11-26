@@ -8,16 +8,32 @@ use android2rust_core::{
 };
 use android2rust_report::{ReportFormat, parse_log_file_with_options, write_report, write_timeline};
 use android2rust_runner::{CancelToken, detect_environment, run_job_blocking};
-use serde_json::{Value, json};
+use android2rust_wpd::{
+    CopyOutOptions, DirectoryMtpSource, LiveWpdSource, MobileFileQuery, MobileFileSearchProvider, MtpDeviceSource,
+    WpdDevicesProvider, WpdError, copy_out, search_devices, write_wpd_entries_export,
+};
+use chrono::{DateTime, NaiveDate, Utc};
+use guap_export::{ExportFormat, ExportOptions};
+pub use guap_mcp::PolicyMode;
+use guap_mcp::{ActionCommand, ActionRiskLevel, McpServerRegistry, McpToolError};
+use guap_table::{GetNirQuery, SortDirection, TableData, TableProvider, TableQuery, TableSchema};
+use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
 use std::path::Path;
+use std::sync::Arc;
 use tracing::{debug, error, info};
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const SERVER_NAME: &str = "android2rust-mcp";
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub fn get_tools_manifest() -> Value {
+const WPD_TOOL_NAMES: &[&str] = &[
+    "android2rust_wpd_devices",
+    "android2rust_mobile_file_search",
+    "android2rust_wpd_delete",
+];
+
+fn get_legacy_tools_manifest() -> Value {
     json!([
         {
             "name": "android2rust_environment",
@@ -174,6 +190,347 @@ pub fn get_tools_manifest() -> Value {
             }
         }
     ])
+}
+
+pub fn build_wpd_registry(policy: PolicyMode) -> McpServerRegistry {
+    let mut reg = McpServerRegistry::new(policy).with_server_info(SERVER_NAME, SERVER_VERSION);
+    reg.register_action(Arc::new(WpdDevicesAction));
+    reg.register_action(Arc::new(MobileFileSearchAction));
+    reg.register_action(Arc::new(WpdDeleteAction));
+    reg
+}
+
+pub fn get_tools_manifest() -> Value {
+    let mut list = get_legacy_tools_manifest().as_array().cloned().unwrap_or_default();
+    if let Value::Array(wpd_tools) = build_wpd_registry(PolicyMode::ReadOnlyOnly).list_tools() {
+        list.extend(wpd_tools);
+    }
+    Value::Array(list)
+}
+
+struct WpdDevicesAction;
+
+impl ActionCommand for WpdDevicesAction {
+    fn command_id(&self) -> &'static str {
+        "android2rust_wpd_devices"
+    }
+
+    fn description(&self) -> &'static str {
+        "Enumerate connected Windows Portable Devices (WPD/MTP) or an offline synthetic directory fixture and their storages."
+    }
+
+    fn risk_level(&self) -> ActionRiskLevel {
+        ActionRiskLevel::ReadOnly
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "source_dir": { "type": "string", "description": "Optional offline synthetic MTP directory fixture path" },
+                "filter": { "type": "string", "description": "Optional GetNir filter expression over device columns" },
+                "offset": { "type": "integer", "minimum": 0 },
+                "limit": { "type": "integer", "minimum": 1 }
+            }
+        })
+    }
+
+    fn execute(&self, args: &Value, _dry_run: bool) -> Result<Value, McpToolError> {
+        let source = select_wpd_source(args);
+        match source.list_devices() {
+            Ok(devices) => {
+                let provider = WpdDevicesProvider::new(&devices);
+                let tq = parse_mcp_table_query(&provider.schema(), args)?;
+                let data = provider.query(&tq)?;
+                Ok(json!({
+                    "status": if devices.is_empty() { "no_devices" } else { "ok" },
+                    "device_count": devices.len(),
+                    "table": table_data_to_json(&data),
+                    "devices": devices,
+                }))
+            }
+            Err(err @ (WpdError::NoDevices | WpdError::UnsupportedPlatform | WpdError::AccessDenied(_))) => Ok(json!({
+                "status": "unavailable",
+                "error": err.to_string(),
+                "device_count": 0,
+                "devices": [],
+            })),
+            Err(err) => Err(McpToolError::ExecutionFailed(err.to_string())),
+        }
+    }
+}
+
+struct MobileFileSearchAction;
+
+impl ActionCommand for MobileFileSearchAction {
+    fn command_id(&self) -> &'static str {
+        "android2rust_mobile_file_search"
+    }
+
+    fn description(&self) -> &'static str {
+        "Search files across connected WPD/MTP devices or an offline synthetic directory fixture by wildcard/regex, size, date range, MIME/extension, with optional path-safe copy_out and Merkle-signed export."
+    }
+
+    fn risk_level(&self) -> ActionRiskLevel {
+        ActionRiskLevel::ReadOnly
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "source_dir": { "type": "string", "description": "Optional offline synthetic MTP directory fixture path" },
+                "pattern": { "type": "string", "description": "Wildcard (*, ?) or regex pattern" },
+                "regex": { "type": "boolean", "default": false },
+                "min_size": { "type": "integer", "minimum": 0 },
+                "max_size": { "type": "integer", "minimum": 0 },
+                "created_after": { "type": "string", "description": "RFC3339 or YYYY-MM-DD" },
+                "created_before": { "type": "string", "description": "RFC3339 or YYYY-MM-DD" },
+                "modified_after": { "type": "string", "description": "RFC3339 or YYYY-MM-DD" },
+                "modified_before": { "type": "string", "description": "RFC3339 or YYYY-MM-DD" },
+                "mime": { "type": "string", "description": "MIME type filter (e.g. image/jpeg or image/*)" },
+                "ext": { "type": "string", "description": "Extension filter (e.g. jpg or .jpg)" },
+                "device": { "type": "string", "description": "Device ID or friendly name substring" },
+                "storage": { "type": "string", "description": "Storage name substring" },
+                "path_prefix": { "type": "string", "description": "MTP folder path prefix" },
+                "include_folders": { "type": "boolean", "default": false },
+                "max_results": { "type": "integer", "minimum": 0 },
+                "copy_out_dir": { "type": "string", "description": "Optional local destination directory for path-traversal-safe copy_out" },
+                "preserve_tree": { "type": "boolean", "default": true },
+                "overwrite": { "type": "boolean", "default": false },
+                "export_path": { "type": "string", "description": "Optional path for guap-export output" },
+                "export_format": { "type": "string", "description": "csv, tsv, json, jsonl, html, html-vertical, or markdown" },
+                "filter": { "type": "string", "description": "Optional GetNir filter over MobileFileSearch columns" },
+                "sort": { "type": "string", "description": "Optional GetNir sort spec (e.g. 'size_bytes desc')" },
+                "columns": { "type": "array", "items": { "type": "string" } },
+                "offset": { "type": "integer", "minimum": 0 },
+                "limit": { "type": "integer", "minimum": 1 }
+            }
+        })
+    }
+
+    fn execute(&self, args: &Value, dry_run: bool) -> Result<Value, McpToolError> {
+        let query = MobileFileQuery {
+            device_filter: args["device"].as_str().map(str::to_string),
+            storage_filter: args["storage"].as_str().map(str::to_string),
+            path_prefix: args["path_prefix"].as_str().map(str::to_string),
+            pattern: args["pattern"].as_str().map(str::to_string),
+            use_regex: args["regex"].as_bool().unwrap_or(false),
+            min_size: args["min_size"].as_u64(),
+            max_size: args["max_size"].as_u64(),
+            created_after: parse_mcp_dt(args["created_after"].as_str())?,
+            created_before: parse_mcp_dt(args["created_before"].as_str())?,
+            modified_after: parse_mcp_dt(args["modified_after"].as_str())?,
+            modified_before: parse_mcp_dt(args["modified_before"].as_str())?,
+            content_type: args["mime"].as_str().map(str::to_string),
+            extension: args["ext"].as_str().map(str::to_string),
+            include_folders: args["include_folders"].as_bool().unwrap_or(false),
+            max_results: args["max_results"].as_u64().map(|n| n as usize),
+        };
+        query
+            .validate()
+            .map_err(|e| McpToolError::InvalidParams(e.to_string()))?;
+
+        let source = select_wpd_source(args);
+        let entries = match search_devices(source.as_ref(), &query) {
+            Ok(list) => list,
+            Err(err @ (WpdError::NoDevices | WpdError::UnsupportedPlatform | WpdError::AccessDenied(_))) => {
+                return Ok(json!({
+                    "status": "unavailable",
+                    "error": err.to_string(),
+                    "matched_count": 0,
+                    "entries": [],
+                }));
+            }
+            Err(WpdError::InvalidQuery(msg)) => return Err(McpToolError::InvalidParams(msg)),
+            Err(err) => return Err(McpToolError::ExecutionFailed(err.to_string())),
+        };
+
+        let provider = MobileFileSearchProvider::new(&entries);
+        let tq = parse_mcp_table_query(&provider.schema(), args)?;
+        let table_data = provider.query(&tq)?;
+
+        let copied =
+            if !dry_run && let Some(dest) = args["copy_out_dir"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                let opts = CopyOutOptions {
+                    preserve_tree: args["preserve_tree"].as_bool().unwrap_or(true),
+                    overwrite: args["overwrite"].as_bool().unwrap_or(false),
+                    max_copy_bytes: None,
+                };
+                Some(
+                    copy_out(source.as_ref(), &entries, Path::new(dest), &opts).map_err(|e| match e {
+                        WpdError::PathTraversal(m) | WpdError::InvalidQuery(m) => McpToolError::InvalidParams(m),
+                        other => McpToolError::ExecutionFailed(other.to_string()),
+                    })?,
+                )
+            } else {
+                None
+            };
+
+        let custody =
+            if !dry_run && let Some(out_str) = args["export_path"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                let fmt_str = args["export_format"].as_str().unwrap_or("csv");
+                let fmt = ExportFormat::parse(fmt_str).map_err(|e| McpToolError::InvalidParams(e.to_string()))?;
+                let manifest = write_wpd_entries_export(&entries, Path::new(out_str), fmt, &ExportOptions::default())
+                    .map_err(|e| McpToolError::ExecutionFailed(e.to_string()))?;
+                Some(manifest)
+            } else {
+                None
+            };
+
+        Ok(json!({
+            "status": "ok",
+            "dry_run": dry_run,
+            "matched_count": entries.len(),
+            "table": table_data_to_json(&table_data),
+            "copied": copied,
+            "custody_manifest": custody,
+        }))
+    }
+}
+
+struct WpdDeleteAction;
+
+impl ActionCommand for WpdDeleteAction {
+    fn command_id(&self) -> &'static str {
+        "android2rust_wpd_delete"
+    }
+
+    fn description(&self) -> &'static str {
+        "Delete an object on a connected WPD/MTP device. Mutating operation: requires AllowMutating policy and confirm_destructive=true."
+    }
+
+    fn risk_level(&self) -> ActionRiskLevel {
+        ActionRiskLevel::Mutating
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "device_id": { "type": "string", "description": "Target WPD device identifier" },
+                "object_id": { "type": "string", "description": "Target WPD object identifier" }
+            },
+            "required": ["device_id", "object_id"]
+        })
+    }
+
+    fn execute(&self, args: &Value, dry_run: bool) -> Result<Value, McpToolError> {
+        let device_id = args["device_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| McpToolError::InvalidParams("missing required string 'device_id'".to_string()))?;
+        let object_id = args["object_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| McpToolError::InvalidParams("missing required string 'object_id'".to_string()))?;
+
+        if dry_run {
+            return Ok(json!({
+                "status": "dry_run",
+                "device_id": device_id,
+                "object_id": object_id,
+                "deleted": false,
+            }));
+        }
+
+        let live = LiveWpdSource::new();
+        live.delete_object(device_id, object_id)
+            .map_err(|e| McpToolError::ExecutionFailed(e.to_string()))?;
+        Ok(json!({
+            "status": "ok",
+            "device_id": device_id,
+            "object_id": object_id,
+            "deleted": true,
+        }))
+    }
+}
+
+fn select_wpd_source(args: &Value) -> Box<dyn MtpDeviceSource> {
+    if let Some(dir) = args["source_dir"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Box::new(DirectoryMtpSource::new(dir))
+    } else {
+        Box::new(LiveWpdSource::new())
+    }
+}
+
+fn parse_mcp_dt(raw: Option<&str>) -> Result<Option<DateTime<Utc>>, McpToolError> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(Some(dt.with_timezone(&Utc)));
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        && let Some(ndt) = d.and_hms_opt(0, 0, 0)
+    {
+        return Ok(Some(ndt.and_utc()));
+    }
+    Err(McpToolError::InvalidParams(format!(
+        "invalid timestamp '{s}'; expected RFC3339 or YYYY-MM-DD"
+    )))
+}
+
+fn parse_mcp_table_query(schema: &TableSchema, args: &Value) -> Result<TableQuery, McpToolError> {
+    let filter = match args["filter"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(f) => Some(GetNirQuery::parse_filter(f)?),
+        None => None,
+    };
+    let sort = match args["sort"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(spec) => {
+            let parsed = GetNirQuery::parse_sort(spec)?;
+            let mut out = Vec::with_capacity(parsed.len());
+            for (col, dir) in parsed {
+                let idx = schema
+                    .column_index(&col)
+                    .ok_or_else(|| McpToolError::InvalidParams(format!("invalid sort column '{col}'")))?;
+                out.push((idx, dir));
+            }
+            out
+        }
+        None => Vec::new(),
+    };
+    let columns = args["columns"].as_array().map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect::<Vec<_>>()
+    });
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let limit = args["limit"].as_u64().map(|n| n as usize);
+    let _ = SortDirection::Asc;
+    Ok(TableQuery {
+        filter,
+        sort,
+        columns,
+        offset,
+        limit,
+    })
+}
+
+fn table_data_to_json(data: &TableData) -> Value {
+    let rows: Vec<Value> = data
+        .rows
+        .iter()
+        .map(|row| {
+            let mut obj = Map::new();
+            obj.insert("row_id".to_string(), json!(row.id));
+            for (idx, col) in data.schema.columns.iter().enumerate() {
+                let val = row.cells.get(idx).map(|c| c.to_json_value()).unwrap_or(Value::Null);
+                obj.insert(col.id.clone(), val);
+            }
+            Value::Object(obj)
+        })
+        .collect();
+    json!({
+        "tool_id": data.schema.tool_id,
+        "title": data.schema.title,
+        "total_rows": data.total_rows,
+        "returned_rows": rows.len(),
+        "columns": data.schema.columns,
+        "rows": rows,
+    })
 }
 
 fn resolve_job_from_args(args: &Value) -> Result<AndroidJob, String> {
@@ -501,6 +858,10 @@ fn merge_forensic_args(job: &mut AndroidJob, args: &Value) {
 }
 
 pub fn handle_jsonrpc_request(req: &Value) -> Option<Value> {
+    handle_jsonrpc_request_with_policy(req, PolicyMode::ReadOnlyOnly)
+}
+
+pub fn handle_jsonrpc_request_with_policy(req: &Value, policy: PolicyMode) -> Option<Value> {
     let id = req.get("id").cloned();
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
     debug!(method, "Received MCP JSON-RPC request");
@@ -536,6 +897,9 @@ pub fn handle_jsonrpc_request(req: &Value) -> Option<Value> {
         "tools/call" => {
             let params = &req["params"];
             let tool_name = params["name"].as_str().unwrap_or("");
+            if WPD_TOOL_NAMES.contains(&tool_name) {
+                return build_wpd_registry(policy).handle_jsonrpc_request(req);
+            }
             let args = &params["arguments"];
             let (text, is_err) = match call_tool(tool_name, args) {
                 Ok(val) => (serde_json::to_string_pretty(&val).unwrap_or_default(), false),
@@ -564,9 +928,14 @@ pub fn handle_jsonrpc_request(req: &Value) -> Option<Value> {
 }
 
 pub fn run_stdio_server() -> Result<(), Box<dyn std::error::Error>> {
+    run_stdio_server_with_policy(PolicyMode::ReadOnlyOnly)
+}
+
+pub fn run_stdio_server_with_policy(policy: PolicyMode) -> Result<(), Box<dyn std::error::Error>> {
     info!(
         server = SERVER_NAME,
         version = SERVER_VERSION,
+        ?policy,
         "Starting android2rust MCP stdio server"
     );
     let stdin = std::io::stdin();
@@ -586,7 +955,7 @@ pub fn run_stdio_server() -> Result<(), Box<dyn std::error::Error>> {
         }
         match serde_json::from_str::<Value>(trimmed) {
             Ok(req) => {
-                if let Some(resp) = handle_jsonrpc_request(&req) {
+                if let Some(resp) = handle_jsonrpc_request_with_policy(&req, policy) {
                     let out = serde_json::to_string(&resp)?;
                     writeln!(stdout, "{out}")?;
                     stdout.flush()?;
@@ -613,7 +982,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn mcp_initialize_and_tools_list_return_ten_tools() {
+    fn mcp_initialize_and_tools_list_return_all_tools() {
         let init_resp = handle_jsonrpc_request(&json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -629,7 +998,95 @@ mod tests {
         }))
         .unwrap();
         let tools = list_resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 10);
+        assert_eq!(tools.len(), 13);
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        for expected in [
+            "android2rust_environment",
+            "android2rust_presets",
+            "android2rust_build_command",
+            "android2rust_parse_command",
+            "android2rust_decode_status",
+            "android2rust_profiles",
+            "android2rust_inspect_artifact",
+            "android2rust_dry_run",
+            "android2rust_run",
+            "android2rust_report",
+            "android2rust_wpd_devices",
+            "android2rust_mobile_file_search",
+            "android2rust_wpd_delete",
+        ] {
+            assert!(names.contains(&expected), "missing tool {expected}");
+        }
+        let search_tool = tools
+            .iter()
+            .find(|t| t["name"] == "android2rust_mobile_file_search")
+            .unwrap();
+        assert_eq!(search_tool["annotations"]["readOnlyHint"], true);
+        assert_eq!(search_tool["annotations"]["destructiveHint"], false);
+
+        let del_tool = tools.iter().find(|t| t["name"] == "android2rust_wpd_delete").unwrap();
+        assert_eq!(del_tool["annotations"]["readOnlyHint"], false);
+        assert_eq!(del_tool["annotations"]["destructiveHint"], true);
+    }
+
+    #[test]
+    fn mcp_wpd_search_and_mutating_policy_gate_work() {
+        let tmp = TempDir::new().unwrap();
+        let dcim = tmp.path().join("DCIM").join("Camera");
+        std::fs::create_dir_all(&dcim).unwrap();
+        std::fs::write(dcim.join("IMG_001.jpg"), b"fakejpg").unwrap();
+        std::fs::write(dcim.join("notes.txt"), b"hello").unwrap();
+
+        let search_resp = handle_jsonrpc_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "android2rust_mobile_file_search",
+                "arguments": {
+                    "source_dir": tmp.path().display().to_string(),
+                    "pattern": "*.jpg"
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(search_resp["result"]["isError"], false);
+        let text = search_resp["result"]["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["matched_count"], 1);
+        assert_eq!(payload["table"]["rows"][0]["filename"], "IMG_001.jpg");
+
+        // ReadOnlyOnly policy blocks mutating delete with JSON-RPC -32003
+        let blocked_ro = handle_jsonrpc_request_with_policy(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": "android2rust_wpd_delete",
+                    "arguments": { "device_id": "dev0", "object_id": "obj0", "confirm_destructive": true }
+                }
+            }),
+            PolicyMode::ReadOnlyOnly,
+        )
+        .unwrap();
+        assert_eq!(blocked_ro["error"]["code"], -32003);
+
+        // AllowMutating still blocks if confirm_destructive is false/omitted
+        let blocked_unconfirmed = handle_jsonrpc_request_with_policy(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": "android2rust_wpd_delete",
+                    "arguments": { "device_id": "dev0", "object_id": "obj0" }
+                }
+            }),
+            PolicyMode::AllowMutating,
+        )
+        .unwrap();
+        assert_eq!(blocked_unconfirmed["error"]["code"], -32003);
     }
 
     #[test]

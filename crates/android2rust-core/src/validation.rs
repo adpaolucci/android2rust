@@ -224,6 +224,45 @@ pub fn validate_job(job: &AndroidJob) -> Vec<ValidationFinding> {
                 });
             }
         }
+        AndroidOperation::MobileFileSearch => {
+            if let (Some(min), Some(max)) = (job.wpd_opts.min_size, job.wpd_opts.max_size)
+                && min > max
+            {
+                out.push(ValidationFinding {
+                    severity: ValidationSeverity::Error,
+                    code: "INVALID_SIZE_RANGE".to_string(),
+                    message: format!("Minimum size ({min}) cannot exceed maximum size ({max})."),
+                    suggestion: Some("Adjust min_size <= max_size.".to_string()),
+                });
+            }
+            for (label, raw_opt) in [
+                ("created_after", job.wpd_opts.created_after.as_deref()),
+                ("created_before", job.wpd_opts.created_before.as_deref()),
+                ("modified_after", job.wpd_opts.modified_after.as_deref()),
+                ("modified_before", job.wpd_opts.modified_before.as_deref()),
+            ] {
+                if let Some(raw) = raw_opt.map(str::trim).filter(|s| !s.is_empty())
+                    && chrono::DateTime::parse_from_rfc3339(raw).is_err()
+                    && chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").is_err()
+                {
+                    out.push(ValidationFinding {
+                        severity: ValidationSeverity::Error,
+                        code: "INVALID_DATE_FILTER".to_string(),
+                        message: format!("Invalid {label} date filter '{raw}'; use RFC3339 or YYYY-MM-DD."),
+                        suggestion: Some("Example: 2026-01-15 or 2026-01-15T00:00:00Z".to_string()),
+                    });
+                }
+            }
+            if let Some(dir) = job
+                .wpd_opts
+                .offline_source_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                warn_if_local_missing(dir, &mut out);
+            }
+        }
         _ => {}
     }
 
@@ -310,5 +349,20 @@ mod tests {
                 .iter()
                 .any(|f| f.code == "INPUT_FILE_NOT_FOUND" && f.severity == ValidationSeverity::Warning)
         );
+    }
+
+    #[test]
+    fn validates_wpd_size_range_and_date_filters() {
+        let mut job = AndroidJob {
+            tool: ToolFamily::Wpd,
+            operation: AndroidOperation::MobileFileSearch,
+            ..Default::default()
+        };
+        job.wpd_opts.min_size = Some(10_000);
+        job.wpd_opts.max_size = Some(100);
+        job.wpd_opts.created_after = Some("not-a-date".to_string());
+        let findings = validate_job(&job);
+        assert!(findings.iter().any(|f| f.code == "INVALID_SIZE_RANGE"));
+        assert!(findings.iter().any(|f| f.code == "INVALID_DATE_FILTER"));
     }
 }

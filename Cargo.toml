@@ -8,6 +8,7 @@ members = [
     "crates/android2rust-cli",
     "crates/android2rust-win32",
     "crates/android2rust-iced",
+    "crates/android2rust-wpd",
 ]
 
 [workspace.package]
@@ -28,6 +29,15 @@ android2rust-core = { path = "crates/android2rust-core" }
 android2rust-runner = { path = "crates/android2rust-runner" }
 android2rust-report = { path = "crates/android2rust-report" }
 android2rust-mcp = { path = "crates/android2rust-mcp" }
+android2rust-wpd = { path = "crates/android2rust-wpd" }
+
+guap-table = { path = "../guap-kit/crates/guap-table" }
+guap-export = { path = "../guap-kit/crates/guap-export" }
+guap-mcp = { path = "../guap-kit/crates/guap-mcp" }
+guap-gui-win32 = { path = "../guap-kit/crates/guap-gui-win32", default-features = false }
+guap-gui-iced = { path = "../guap-kit/crates/guap-gui-iced" }
+
+windows = "0.62"
 
 anyhow = "1.0"
 thiserror = "2.0"
@@ -50,6 +60,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ctrlc = "3.4"
 winsafe = { version = "0.0.29", features = ["gui", "shell"] }
 iced = { version = "0.14", features = ["wgpu", "tiny-skia", "tokio"] }
+tokio = { version = "1.54", default-features = false, features = ["rt"] }
 rfd = "0.18"
 arboard = "3.6"
 

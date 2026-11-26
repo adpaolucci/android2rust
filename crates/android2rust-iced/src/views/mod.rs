@@ -2,6 +2,7 @@ pub mod batch_queue;
 pub mod designer;
 pub mod history_view;
 pub mod live_console;
+pub mod mobile_search;
 pub mod modals;
 pub mod options_tabs;
 pub mod sidebar;

@@ -67,6 +67,7 @@ pub fn parse_recipe(bytes: &[u8]) -> Result<(AndroidJob, Vec<String>)> {
                 job.tool = match val.to_ascii_lowercase().as_str() {
                     "fastboot" => ToolFamily::Fastboot,
                     "forensics" | "inspect" => ToolFamily::Forensics,
+                    "wpd" | "mtp" => ToolFamily::Wpd,
                     _ => ToolFamily::Adb,
                 };
             }
@@ -100,6 +101,35 @@ pub fn parse_recipe(bytes: &[u8]) -> Result<(AndroidJob, Vec<String>)> {
                 job.forensic_opts.case_meta.examiner = if val.is_empty() { None } else { Some(val.to_string()) };
             }
             "dry_run" => job.dry_run = val.eq_ignore_ascii_case("true") || val == "1",
+            "pattern" => job.wpd_opts.pattern = val.to_string(),
+            "regex" | "use_regex" => job.wpd_opts.use_regex = val.eq_ignore_ascii_case("true") || val == "1",
+            "min_size" => job.wpd_opts.min_size = val.parse().ok(),
+            "max_size" => job.wpd_opts.max_size = val.parse().ok(),
+            "created_after" => {
+                job.wpd_opts.created_after = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
+            "created_before" => {
+                job.wpd_opts.created_before = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
+            "modified_after" => {
+                job.wpd_opts.modified_after = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
+            "modified_before" => {
+                job.wpd_opts.modified_before = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
+            "mime" | "mime_or_ext" => {
+                job.wpd_opts.mime_or_ext = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
+            "max_results" => job.wpd_opts.max_results = val.parse().ok(),
+            "device_filter" => {
+                job.wpd_opts.device_filter = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
+            "source_dir" | "offline_source_dir" => {
+                job.wpd_opts.offline_source_dir = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
+            "copy_out" | "copy_out_dir" => {
+                job.wpd_opts.copy_out_dir = if val.is_empty() { None } else { Some(val.to_string()) };
+            }
             _ => warnings.push(format!("Line {}: unknown recipe key '{key}'", idx + 1)),
         }
     }
@@ -164,5 +194,25 @@ mod tests {
         assert_eq!(parsed_be.forensic_opts.case_meta.case_id.as_deref(), Some("IR-7"));
         assert_eq!(parsed_be.forensic_opts.case_meta.evidence_id.as_deref(), Some("EV-3"));
         assert_eq!(parsed_be.forensic_opts.case_meta.examiner.as_deref(), Some("Ada"));
+
+        let kv_wpd = "\
+operation=mobile-file-search
+pattern=*.jpg
+use_regex=false
+min_size=100
+max_size=5000
+created_after=2026-01-01
+created_before=2026-05-01
+modified_after=2026-02-01
+modified_before=2026-06-01
+source_dir=C:\\MtpFixture
+";
+        let (parsed_wpd, wpd_warn) = parse_recipe(kv_wpd.as_bytes()).unwrap();
+        assert!(wpd_warn.is_empty(), "{wpd_warn:?}");
+        assert_eq!(parsed_wpd.operation, AndroidOperation::MobileFileSearch);
+        assert_eq!(parsed_wpd.wpd_opts.created_after.as_deref(), Some("2026-01-01"));
+        assert_eq!(parsed_wpd.wpd_opts.created_before.as_deref(), Some("2026-05-01"));
+        assert_eq!(parsed_wpd.wpd_opts.modified_after.as_deref(), Some("2026-02-01"));
+        assert_eq!(parsed_wpd.wpd_opts.modified_before.as_deref(), Some("2026-06-01"));
     }
 }

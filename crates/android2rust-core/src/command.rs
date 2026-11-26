@@ -176,6 +176,125 @@ pub fn build_args(job: &AndroidJob) -> (String, Vec<String>) {
             }
             return ("android2rust".to_string(), args);
         }
+        ToolFamily::Wpd => {
+            args.push("mtp".to_string());
+            args.push("search".to_string());
+            let pat = job.wpd_opts.pattern.trim();
+            if !pat.is_empty() {
+                args.push("--pattern".to_string());
+                args.push(pat.to_string());
+            }
+            if job.wpd_opts.use_regex {
+                args.push("--regex".to_string());
+            }
+            if let Some(min) = job.wpd_opts.min_size {
+                args.push("--min-size".to_string());
+                args.push(min.to_string());
+            }
+            if let Some(max) = job.wpd_opts.max_size {
+                args.push("--max-size".to_string());
+                args.push(max.to_string());
+            }
+            if let Some(ts) = job
+                .wpd_opts
+                .created_after
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args.push("--created-after".to_string());
+                args.push(ts.to_string());
+            }
+            if let Some(ts) = job
+                .wpd_opts
+                .created_before
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args.push("--created-before".to_string());
+                args.push(ts.to_string());
+            }
+            if let Some(ts) = job
+                .wpd_opts
+                .modified_after
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args.push("--modified-after".to_string());
+                args.push(ts.to_string());
+            }
+            if let Some(ts) = job
+                .wpd_opts
+                .modified_before
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args.push("--modified-before".to_string());
+                args.push(ts.to_string());
+            }
+            if let Some(mime) = job
+                .wpd_opts
+                .mime_or_ext
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args.push("--mime".to_string());
+                args.push(mime.to_string());
+            }
+            if let Some(max_res) = job.wpd_opts.max_results {
+                args.push("--max-results".to_string());
+                args.push(max_res.to_string());
+            }
+            if let Some(dev) = job
+                .wpd_opts
+                .device_filter
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                args.push("--device".to_string());
+                args.push(dev.to_string());
+            }
+            let src_dir = job
+                .wpd_opts
+                .offline_source_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    let s = job.source_path.trim();
+                    if s.is_empty() { None } else { Some(s) }
+                });
+            if let Some(dir) = src_dir {
+                args.push("--source-dir".to_string());
+                args.push(dir.to_string());
+            }
+            let copy_dir = job
+                .wpd_opts
+                .copy_out_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    let t = job.target_path.trim();
+                    if t.is_empty() { None } else { Some(t) }
+                });
+            if let Some(dir) = copy_dir {
+                args.push("--copy-out".to_string());
+                args.push(dir.to_string());
+            }
+            for extra in &job.extra_args {
+                let t = extra.trim();
+                if !t.is_empty() {
+                    args.push(t.to_string());
+                }
+            }
+            return ("android2rust".to_string(), args);
+        }
     }
 
     for extra in &job.extra_args {

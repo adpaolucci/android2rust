@@ -7,6 +7,7 @@ pub enum ToolFamily {
     Adb,
     Fastboot,
     Forensics,
+    Wpd,
 }
 
 impl ToolFamily {
@@ -15,6 +16,7 @@ impl ToolFamily {
             Self::Adb => "adb",
             Self::Fastboot => "fastboot",
             Self::Forensics => "android2rust inspect",
+            Self::Wpd => "android2rust mtp",
         }
     }
 
@@ -23,6 +25,7 @@ impl ToolFamily {
             Self::Adb => "ADB",
             Self::Fastboot => "Fastboot",
             Self::Forensics => "Offline Forensics",
+            Self::Wpd => "WPD / MTP",
         }
     }
 }
@@ -114,6 +117,8 @@ pub enum AndroidOperation {
     FastbootReboot,
     // Pure-Rust offline forensics
     InspectArtifact,
+    // WPD / MTP Mobile File Search
+    MobileFileSearch,
 }
 
 impl AndroidOperation {
@@ -145,6 +150,7 @@ impl AndroidOperation {
         Self::FastbootFlashingLock,
         Self::FastbootReboot,
         Self::InspectArtifact,
+        Self::MobileFileSearch,
     ];
 
     pub fn default_tool(self) -> ToolFamily {
@@ -159,6 +165,7 @@ impl AndroidOperation {
             | Self::FastbootFlashingLock
             | Self::FastbootReboot => ToolFamily::Fastboot,
             Self::InspectArtifact => ToolFamily::Forensics,
+            Self::MobileFileSearch => ToolFamily::Wpd,
             _ => ToolFamily::Adb,
         }
     }
@@ -192,6 +199,7 @@ impl AndroidOperation {
             Self::FastbootFlashingLock => "fastboot flashing lock",
             Self::FastbootReboot => "fastboot reboot",
             Self::InspectArtifact => "Inspect Local Artifact (Offline Forensics)",
+            Self::MobileFileSearch => "Mobile File Search (WPD/MTP)",
         }
     }
 
@@ -224,12 +232,16 @@ impl AndroidOperation {
             Self::FastbootFlashingLock => "fastboot-lock",
             Self::FastbootReboot => "fastboot-reboot",
             Self::InspectArtifact => "inspect",
+            Self::MobileFileSearch => "mtp-search",
         }
     }
 
     pub fn from_slug(raw: &str) -> Option<Self> {
         let norm = raw.trim().to_ascii_lowercase();
-        Self::ALL.iter().copied().find(|op| op.slug() == norm)
+        match norm.as_str() {
+            "mobile-search" | "mobile-file-search" | "mobilefilesearch" | "wpd-search" => Some(Self::MobileFileSearch),
+            _ => Self::ALL.iter().copied().find(|op| op.slug() == norm),
+        }
     }
 }
 
@@ -374,6 +386,23 @@ impl Default for ForensicOptions {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WpdSearchOptions {
+    pub pattern: String,
+    pub use_regex: bool,
+    pub min_size: Option<u64>,
+    pub max_size: Option<u64>,
+    pub created_after: Option<String>,
+    pub created_before: Option<String>,
+    pub modified_after: Option<String>,
+    pub modified_before: Option<String>,
+    pub mime_or_ext: Option<String>,
+    pub max_results: Option<usize>,
+    pub device_filter: Option<String>,
+    pub copy_out_dir: Option<String>,
+    pub offline_source_dir: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AndroidJob {
     pub name: String,
@@ -393,6 +422,8 @@ pub struct AndroidJob {
     pub backup_opts: BackupOptions,
     pub fastboot_opts: FastbootOptions,
     pub forensic_opts: ForensicOptions,
+    #[serde(default)]
+    pub wpd_opts: WpdSearchOptions,
     pub dry_run: bool,
     pub extra_args: Vec<String>,
 }
@@ -415,6 +446,7 @@ impl Default for AndroidJob {
             backup_opts: BackupOptions::default(),
             fastboot_opts: FastbootOptions::default(),
             forensic_opts: ForensicOptions::default(),
+            wpd_opts: WpdSearchOptions::default(),
             dry_run: false,
             extra_args: Vec::new(),
         }
@@ -532,5 +564,82 @@ mod tests {
         job.target_path.clear();
         job.fastboot_opts.wipe_userdata = true;
         assert!(!job.is_destructive());
+    }
+
+    #[test]
+    fn deserializes_legacy_android_job_json_without_wpd_opts() {
+        let legacy_json = r#"{
+            "name": "Legacy ADB Pull",
+            "description": "Pull DCIM from device",
+            "tool": "Adb",
+            "operation": "Pull",
+            "serial": "R58M123",
+            "transport": { "Serial": "R58M123" },
+            "source_path": "/sdcard/DCIM",
+            "target_path": "C:\\Backup",
+            "reboot_target": "System",
+            "package_opts": {
+                "reinstall": false,
+                "allow_downgrade": false,
+                "grant_permissions": false,
+                "keep_data": false,
+                "third_party_only": false,
+                "system_only": false,
+                "show_apk_path": false,
+                "show_installer": false,
+                "show_uid": false,
+                "user_id": null
+            },
+            "transfer_opts": {
+                "preserve_timestamps": true,
+                "sync_only_newer": false,
+                "compression": null
+            },
+            "logcat_opts": {
+                "buffers": ["main"],
+                "format": "threadtime",
+                "clear_first": false,
+                "dump_and_exit": true,
+                "max_lines": 500,
+                "filter_specs": []
+            },
+            "backup_opts": {
+                "include_apk": false,
+                "include_obb": false,
+                "include_shared": false,
+                "all_apps": false,
+                "include_system": false,
+                "packages": []
+            },
+            "fastboot_opts": {
+                "partition": "",
+                "slot": null,
+                "wipe_userdata": false,
+                "skip_reboot": false,
+                "disable_verity": false,
+                "disable_verification": false
+            },
+            "forensic_opts": {
+                "compute_sha256": true,
+                "extract_manifest_permissions": true,
+                "inspect_sqlite_tables": true,
+                "inspect_ab_tar_entries": true,
+                "max_entries": 2000,
+                "case_meta": {}
+            },
+            "dry_run": false,
+            "extra_args": []
+        }"#;
+
+        let job: AndroidJob = serde_json::from_str(legacy_json).expect("legacy AndroidJob JSON must deserialize");
+        assert_eq!(job.name, "Legacy ADB Pull");
+        assert_eq!(job.operation, AndroidOperation::Pull);
+        assert_eq!(job.serial, "R58M123");
+        assert_eq!(job.wpd_opts, WpdSearchOptions::default());
+
+        let mut val = serde_json::to_value(AndroidJob::default()).unwrap();
+        val.as_object_mut().unwrap().remove("wpd_opts");
+        let roundtrip: AndroidJob = serde_json::from_value(val).expect("AndroidJob without wpd_opts must deserialize");
+        assert_eq!(roundtrip.wpd_opts, WpdSearchOptions::default());
     }
 }

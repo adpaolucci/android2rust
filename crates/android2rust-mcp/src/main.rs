@@ -1,16 +1,18 @@
 #![forbid(unsafe_code)]
 
-use android2rust_mcp::{SERVER_NAME, SERVER_VERSION, get_tools_manifest, run_stdio_server};
+use android2rust_mcp::{PolicyMode, SERVER_NAME, SERVER_VERSION, get_tools_manifest, run_stdio_server_with_policy};
 use std::process;
 
 fn main() {
     let mut show_tools = false;
+    let mut allow_mutating = false;
     let mut log_level = "warn".to_string();
     let mut args = std::env::args().skip(1);
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--tools" => show_tools = true,
+            "--allow-mutating" => allow_mutating = true,
             "--log-level" => {
                 if let Some(lvl) = args.next() {
                     log_level = lvl;
@@ -24,6 +26,7 @@ fn main() {
                        {SERVER_NAME} [OPTIONS]\n\n\
                      OPTIONS:\n\
                        --tools              Print available MCP tools in JSON schema format and exit\n\
+                       --allow-mutating     Enable mutating WPD actions (still requires confirm_destructive=true)\n\
                        --log-level <LEVEL>  Log level filter sent to stderr [default: warn]\n\
                        -h, --help           Print help\n\
                        -V, --version        Print version"
@@ -44,8 +47,13 @@ fn main() {
         process::exit(0);
     }
 
+    let policy = if allow_mutating {
+        PolicyMode::AllowMutating
+    } else {
+        PolicyMode::ReadOnlyOnly
+    };
     let _ = android2rust_core::logging::init_logging(&log_level, None);
-    if let Err(e) = run_stdio_server() {
+    if let Err(e) = run_stdio_server_with_policy(policy) {
         eprintln!("android2rust-mcp fatal error: {e}");
         process::exit(1);
     }

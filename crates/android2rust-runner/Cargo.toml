@@ -10,6 +10,7 @@ description = "ADB/Fastboot process executor, dry-run pre-flight simulator, offl
 
 [dependencies]
 android2rust-core.workspace = true
+android2rust-wpd.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true

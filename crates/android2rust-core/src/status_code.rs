@@ -140,6 +140,32 @@ pub fn decode_status_code(raw: &str) -> StatusCodeInfo {
             StatusSeverity::Error,
             false,
         ),
+        "NO_WPD_DEVICES" => (
+            "NO_WPD_DEVICES".to_string(),
+            "No Windows Portable Devices (WPD/MTP) portable devices were detected.",
+            vec![
+                "Connect the Android device via USB and select 'File Transfer (MTP)' in the USB notification.",
+                "Unlock the device screen or provide an offline synthetic directory fixture via --source-dir.",
+            ],
+            StatusSeverity::Error,
+            false,
+        ),
+        "WPD_ACCESS_DENIED" => (
+            "WPD_ACCESS_DENIED".to_string(),
+            "Access denied by WPD/MTP portable device.",
+            vec!["Unlock the Android device screen and confirm MTP file transfer permission."],
+            StatusSeverity::Error,
+            false,
+        ),
+        "WPD_UNSUPPORTED_PLATFORM" => (
+            "WPD_UNSUPPORTED_PLATFORM".to_string(),
+            "Live WPD COM device enumeration is only supported on Windows.",
+            vec![
+                "Pass --source-dir <fixture_dir> to search an offline synthetic MTP directory tree on non-Windows hosts.",
+            ],
+            StatusSeverity::Error,
+            false,
+        ),
         "INSTALL_FAILED_ALREADY_EXISTS" => (
             upper.clone(),
             "Package is already installed on the device.",

@@ -11,6 +11,7 @@ pub enum FileActionKind {
     Logcat,
     Fastboot,
     Forensic,
+    Wpd,
     Error,
 }
 
@@ -24,12 +25,13 @@ impl FileActionKind {
             Self::Logcat => "Logcat",
             Self::Fastboot => "Fastboot",
             Self::Forensic => "Forensic",
+            Self::Wpd => "WPD/MTP",
             Self::Error => "Error",
         }
     }
 
     pub fn is_transfer_or_forensic(self) -> bool {
-        matches!(self, Self::Transfer | Self::Forensic)
+        matches!(self, Self::Transfer | Self::Forensic | Self::Wpd)
     }
 
     pub fn is_device_or_pkg(self) -> bool {

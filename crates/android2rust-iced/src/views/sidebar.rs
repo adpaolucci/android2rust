@@ -23,6 +23,9 @@ pub fn view_sidebar(app: &App) -> Element<'_, Message> {
                 format!(" ({})", app.live_file_actions.len())
             }
             WorkspaceTab::HistoryReports if !app.run_history.is_empty() => format!(" ({})", app.run_history.len()),
+            WorkspaceTab::MobileFileSearch if !app.wpd_results.is_empty() => {
+                format!(" ({})", app.wpd_results.len())
+            }
             _ => String::new(),
         };
         let active = app.active_tab == *tab;

@@ -7,9 +7,13 @@ use android2rust_core::{
     ValidationSeverity, build_batch_script, build_powershell_script, build_schtasks_command, build_shell_script,
     decode_status_code, parse_command_line, parse_recipe, read_recipe_bounded, serialize_recipe,
 };
-use android2rust_report::{ReportFormat, write_report};
+use android2rust_report::{ReportFormat, export_wpd_results, write_report};
 use android2rust_runner::{RunResult, RunnerEvent, spawn_job_runner};
+use android2rust_wpd::{
+    CopyOutOptions, DirectoryMtpSource, LiveWpdSource, MobileFileQuery, MtpDeviceSource, copy_out, search_devices,
+};
 use chrono::Utc;
+use guap_export::ExportFormat;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -916,6 +920,161 @@ impl BatchHistoryPage {
 }
 
 #[derive(Clone)]
+struct MobileSearchPage {
+    page: gui::TabPage,
+    source_mode_combo: gui::ComboBox,
+    dir_edit: gui::Edit,
+    btn_browse_dir: gui::Button,
+    device_edit: gui::Edit,
+    btn_list_devices: gui::Button,
+    btn_search: gui::Button,
+    pattern_edit: gui::Edit,
+    chk_regex: gui::CheckBox,
+    min_size_edit: gui::Edit,
+    max_size_edit: gui::Edit,
+    mime_edit: gui::Edit,
+    max_results_edit: gui::Edit,
+    status_lbl: gui::Label,
+    btn_copy_out: gui::Button,
+    btn_exp_csv: gui::Button,
+    btn_exp_json: gui::Button,
+    btn_exp_html: gui::Button,
+    btn_exp_md: gui::Button,
+    results_list: gui::ListView,
+}
+
+impl MobileSearchPage {
+    fn new(parent: &(impl GuiParent + 'static)) -> Self {
+        let page = tab_page(parent);
+
+        lbl(&page, "Source:", 10, 12, 48);
+        let source_mode_combo = gui::ComboBox::new(
+            &page,
+            gui::ComboBoxOpts {
+                position: gui::dpi(60, 9),
+                width: gui::dpi_x(165),
+                items: &["Live WPD/MTP", "Offline Directory Fixture"],
+                selected_item: Some(0),
+                ..Default::default()
+            },
+        );
+        let dir_edit = edit(&page, 232, 9, 250, 22, (gui::Horz::None, gui::Vert::None));
+        let btn_browse_dir = btn(&page, "Dir...", 488, 8, 52, 24, (gui::Horz::None, gui::Vert::None));
+        lbl(&page, "Device:", 548, 12, 46);
+        let device_edit = edit(&page, 598, 9, 130, 22, (gui::Horz::None, gui::Vert::None));
+        let btn_list_devices = btn(&page, "Devices", 734, 8, 72, 24, (gui::Horz::None, gui::Vert::None));
+        let btn_search = btn(&page, "Search", 812, 8, 76, 24, (gui::Horz::None, gui::Vert::None));
+
+        lbl(&page, "Pattern:", 10, 42, 48);
+        let pattern_edit = edit(&page, 60, 39, 185, 22, (gui::Horz::None, gui::Vert::None));
+        let chk_regex = chk(&page, "Regex", 252, 41);
+        lbl(&page, "Min B:", 320, 42, 40);
+        let min_size_edit = edit(&page, 362, 39, 80, 22, (gui::Horz::None, gui::Vert::None));
+        lbl(&page, "Max B:", 448, 42, 42);
+        let max_size_edit = edit(&page, 492, 39, 80, 22, (gui::Horz::None, gui::Vert::None));
+        lbl(&page, "MIME/Ext:", 578, 42, 60);
+        let mime_edit = edit(&page, 640, 39, 120, 22, (gui::Horz::None, gui::Vert::None));
+        lbl(&page, "Max:", 766, 42, 32);
+        let max_results_edit = edit(&page, 800, 39, 75, 22, (gui::Horz::None, gui::Vert::None));
+
+        let status_lbl = lbl(
+            &page,
+            "Ready — click Search for live WPD/MTP devices or select an Offline Directory Fixture.",
+            10,
+            72,
+            515,
+        );
+        let btn_copy_out = btn(
+            &page,
+            "Copy Out Selected...",
+            535,
+            68,
+            135,
+            24,
+            (gui::Horz::None, gui::Vert::None),
+        );
+        let btn_exp_csv = btn(&page, "CSV...", 676, 68, 54, 24, (gui::Horz::None, gui::Vert::None));
+        let btn_exp_json = btn(&page, "JSON...", 734, 68, 58, 24, (gui::Horz::None, gui::Vert::None));
+        let btn_exp_html = btn(&page, "HTML...", 796, 68, 58, 24, (gui::Horz::None, gui::Vert::None));
+        let btn_exp_md = btn(&page, "MD...", 858, 68, 50, 24, (gui::Horz::None, gui::Vert::None));
+
+        let results_list = gui::ListView::new(
+            &page,
+            gui::ListViewOpts {
+                position: gui::dpi(10, 100),
+                size: gui::dpi(970, 380),
+                columns: &[
+                    ("DeviceName", gui::dpi_x(110)),
+                    ("StorageName", gui::dpi_x(95)),
+                    ("ObjectID", gui::dpi_x(85)),
+                    ("FullPath", gui::dpi_x(200)),
+                    ("Filename", gui::dpi_x(130)),
+                    ("Extension", gui::dpi_x(65)),
+                    ("SizeBytes", gui::dpi_x(85)),
+                    ("CreatedTime", gui::dpi_x(135)),
+                    ("ModifiedTime", gui::dpi_x(135)),
+                    ("ContentType", gui::dpi_x(105)),
+                ],
+                resize_behavior: (gui::Horz::None, gui::Vert::None),
+                ..Default::default()
+            },
+        );
+
+        {
+            let status_lbl = status_lbl.clone();
+            let results_list = results_list.clone();
+            page.on().wm_size(move |p| {
+                if p.request == co::SIZE_R::MINIMIZED || p.client_area.cx <= 0 || p.client_area.cy <= 0 {
+                    return Ok(());
+                }
+                let w = p.client_area.cx;
+                let h = p.client_area.cy;
+                let pad = gui::dpi_x(10);
+                let full_w = (w - 2 * pad).max(gui::dpi_x(200));
+                move_ctrl(
+                    &status_lbl,
+                    pad,
+                    gui::dpi_y(72),
+                    (gui::dpi_x(515)).min(full_w),
+                    gui::dpi_y(18),
+                );
+                move_ctrl(
+                    &results_list,
+                    pad,
+                    gui::dpi_y(100),
+                    full_w,
+                    (h - gui::dpi_y(100) - gui::dpi_y(10)).max(gui::dpi_y(120)),
+                );
+                Ok(())
+            });
+        }
+
+        Self {
+            page,
+            source_mode_combo,
+            dir_edit,
+            btn_browse_dir,
+            device_edit,
+            btn_list_devices,
+            btn_search,
+            pattern_edit,
+            chk_regex,
+            min_size_edit,
+            max_size_edit,
+            mime_edit,
+            max_results_edit,
+            status_lbl,
+            btn_copy_out,
+            btn_exp_csv,
+            btn_exp_json,
+            btn_exp_html,
+            btn_exp_md,
+            results_list,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct Win32App {
     wnd: gui::WindowMain,
     op_combo: gui::ComboBox,
@@ -946,6 +1105,7 @@ struct Win32App {
     forensics_pg: ForensicsPage,
     console_pg: ConsolePage,
     batch_pg: BatchHistoryPage,
+    mobile_pg: MobileSearchPage,
 
     cmd_edit: gui::Edit,
     btn_copy_cmd: gui::Button,
@@ -1156,6 +1316,7 @@ pub fn run(launch: LaunchArgs) -> anyhow::Result<()> {
     let forensics_pg = ForensicsPage::new(&wnd);
     let console_pg = ConsolePage::new(&wnd);
     let batch_pg = BatchHistoryPage::new(&wnd);
+    let mobile_pg = MobileSearchPage::new(&wnd);
 
     let tab_pages = vec![
         designer.page.clone(),
@@ -1165,6 +1326,7 @@ pub fn run(launch: LaunchArgs) -> anyhow::Result<()> {
         forensics_pg.page.clone(),
         console_pg.page.clone(),
         batch_pg.page.clone(),
+        mobile_pg.page.clone(),
     ];
 
     let tab = gui::Tab::new(
@@ -1181,6 +1343,7 @@ pub fn run(launch: LaunchArgs) -> anyhow::Result<()> {
                 ("Forensics && Artifacts", forensics_pg.page.clone()),
                 ("Live Console && Records", console_pg.page.clone()),
                 ("Batch && History", batch_pg.page.clone()),
+                ("WPD && Mobile Search", mobile_pg.page.clone()),
             ],
             ..Default::default()
         },
@@ -1253,6 +1416,7 @@ pub fn run(launch: LaunchArgs) -> anyhow::Result<()> {
         forensics_pg,
         console_pg,
         batch_pg,
+        mobile_pg,
         cmd_edit,
         btn_copy_cmd,
         btn_exp_recipe,
@@ -2237,6 +2401,7 @@ impl Win32App {
             self2.designer.sch_highest.set_check(true);
             let _ = self2.batch_pg.code_edit.set_text("DEVICE_UNAUTHORIZED");
             self2.batch_pg.chk_stop_err.set_check(true);
+            let _ = self2.mobile_pg.max_results_edit.set_text("2000");
             self2.suppress_sync.store(false, Ordering::SeqCst);
 
             self2.refresh_profile_combo();
@@ -2819,6 +2984,86 @@ impl Win32App {
         // Bottom Command Bar
         {
             let app = self.clone();
+            self.mobile_pg.source_mode_combo.on().cbn_sel_change(move || {
+                let use_live = app.mobile_pg.source_mode_combo.items().selected_index() != Some(1);
+                app.state.lock().unwrap().wpd_use_live = use_live;
+                Ok(())
+            });
+        }
+        {
+            let app = self.clone();
+            self.mobile_pg.btn_browse_dir.on().bn_clicked(move || {
+                if let Ok(Some(dir)) = pick_folder(app.wnd.hwnd(), "Select Offline Synthetic MTP Fixture Directory") {
+                    let _ = app.mobile_pg.dir_edit.set_text(&dir);
+                    app.mobile_pg.source_mode_combo.items().select(Some(1));
+                    let mut st = app.state.lock().unwrap();
+                    st.wpd_use_live = false;
+                    st.wpd_fixture_dir = dir;
+                }
+                Ok(())
+            });
+        }
+        {
+            let app = self.clone();
+            self.mobile_pg.btn_list_devices.on().bn_clicked(move || {
+                app.run_wpd_list_devices();
+                Ok(())
+            });
+        }
+        {
+            let app = self.clone();
+            self.mobile_pg.btn_search.on().bn_clicked(move || {
+                app.run_wpd_search();
+                Ok(())
+            });
+        }
+        {
+            let app = self.clone();
+            self.mobile_pg.btn_copy_out.on().bn_clicked(move || {
+                app.run_wpd_copy_out();
+                Ok(())
+            });
+        }
+        for (button, fmt, def_name, ext, flt) in [
+            (
+                &self.mobile_pg.btn_exp_csv,
+                ExportFormat::Csv,
+                "wpd_mobile_search.csv",
+                "csv",
+                ("CSV (*.csv)", "*.csv"),
+            ),
+            (
+                &self.mobile_pg.btn_exp_json,
+                ExportFormat::Json,
+                "wpd_mobile_search.json",
+                "json",
+                ("JSON (*.json)", "*.json"),
+            ),
+            (
+                &self.mobile_pg.btn_exp_html,
+                ExportFormat::Html,
+                "wpd_mobile_search.html",
+                "html",
+                ("HTML (*.html)", "*.html"),
+            ),
+            (
+                &self.mobile_pg.btn_exp_md,
+                ExportFormat::Markdown,
+                "wpd_mobile_search.md",
+                "md",
+                ("Markdown (*.md)", "*.md"),
+            ),
+        ] {
+            let app = self.clone();
+            button.on().bn_clicked(move || {
+                app.export_wpd_table(fmt, def_name, ext, flt);
+                Ok(())
+            });
+        }
+
+        // Bottom Command Bar
+        {
+            let app = self.clone();
             self.btn_copy_cmd.on().bn_clicked(move || {
                 let cmd = app.state.lock().unwrap().cached_command.clone();
                 if copy_to_clipboard(&cmd) {
@@ -3048,5 +3293,331 @@ impl Win32App {
                     .MessageBox(&msg_txt, "About Android2Rust Win32", co::MB::ICONINFORMATION);
             }),
         );
+    }
+
+    fn current_wpd_source_spec(&self) -> (bool, String) {
+        let use_live = self.mobile_pg.source_mode_combo.items().selected_index() != Some(1);
+        let dir = self.mobile_pg.dir_edit.text().unwrap_or_default().trim().to_string();
+        (use_live, dir)
+    }
+
+    fn build_wpd_query_from_controls(&self) -> Result<MobileFileQuery, String> {
+        let pattern_txt = self.mobile_pg.pattern_edit.text().unwrap_or_default();
+        let pattern = (!pattern_txt.trim().is_empty()).then(|| pattern_txt.trim().to_string());
+        let use_regex = self.mobile_pg.chk_regex.is_checked();
+        let dev_txt = self.mobile_pg.device_edit.text().unwrap_or_default();
+        let device_filter = (!dev_txt.trim().is_empty()).then(|| dev_txt.trim().to_string());
+
+        let min_txt = self.mobile_pg.min_size_edit.text().unwrap_or_default();
+        let min_size = if min_txt.trim().is_empty() {
+            None
+        } else {
+            Some(
+                min_txt
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| format!("Invalid min size '{}'", min_txt.trim()))?,
+            )
+        };
+        let max_txt = self.mobile_pg.max_size_edit.text().unwrap_or_default();
+        let max_size = if max_txt.trim().is_empty() {
+            None
+        } else {
+            Some(
+                max_txt
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| format!("Invalid max size '{}'", max_txt.trim()))?,
+            )
+        };
+
+        let max_res_txt = self.mobile_pg.max_results_edit.text().unwrap_or_default();
+        let max_results = if max_res_txt.trim().is_empty() {
+            None
+        } else {
+            Some(
+                max_res_txt
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| format!("Invalid max results '{}'", max_res_txt.trim()))?,
+            )
+        };
+
+        let mime_txt = self.mobile_pg.mime_edit.text().unwrap_or_default();
+        let (content_type, extension) = if mime_txt.trim().is_empty() {
+            (None, None)
+        } else if mime_txt.contains('/') || mime_txt.contains('*') {
+            (Some(mime_txt.trim().to_string()), None)
+        } else {
+            (None, Some(mime_txt.trim().to_string()))
+        };
+
+        let q = MobileFileQuery {
+            device_filter,
+            pattern,
+            use_regex,
+            min_size,
+            max_size,
+            content_type,
+            extension,
+            max_results,
+            ..Default::default()
+        };
+        q.validate().map_err(|e| e.to_string())?;
+        Ok(q)
+    }
+
+    fn set_wpd_status(&self, msg: &str) {
+        let _ = self.mobile_pg.status_lbl.hwnd().SetWindowText(msg);
+        let mut st = self.state.lock().unwrap();
+        st.wpd_status = msg.to_string();
+        st.status_message = msg.to_string();
+        self.refresh_status_bar(&st);
+    }
+
+    fn refresh_wpd_results_list(&self) {
+        let st = self.state.lock().unwrap();
+        self.mobile_pg.results_list.set_redraw(false);
+        let _ = self.mobile_pg.results_list.items().delete_all();
+        for e in &st.wpd_results {
+            let sz = format_bytes(e.size_bytes);
+            let created = e
+                .created_time
+                .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_default();
+            let modified = e
+                .modified_time
+                .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_default();
+            let _ = self.mobile_pg.results_list.items().add(
+                &[
+                    &e.device_name,
+                    &e.storage_name,
+                    &e.object_id,
+                    &e.full_path,
+                    &e.filename,
+                    &e.extension,
+                    &sz,
+                    &created,
+                    &modified,
+                    &e.content_type,
+                ],
+                None,
+                (),
+            );
+        }
+        self.mobile_pg.results_list.set_redraw(true);
+    }
+
+    fn run_wpd_list_devices(&self) {
+        let (use_live, dir) = self.current_wpd_source_spec();
+        if !use_live && dir.is_empty() {
+            self.set_wpd_status("Select an Offline Directory Fixture or switch to Live WPD/MTP.");
+            return;
+        }
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.wpd_scanning {
+                return;
+            }
+            st.wpd_scanning = true;
+        }
+        self.set_wpd_status("Scanning WPD/MTP devices...");
+
+        let app = self.clone();
+        std::thread::spawn(move || {
+            let source: Box<dyn MtpDeviceSource> = if use_live {
+                Box::new(LiveWpdSource::new())
+            } else {
+                Box::new(DirectoryMtpSource::new(dir))
+            };
+            let res = source.list_devices();
+            let app2 = app.clone();
+            app.wnd.run_ui_thread(move || {
+                let msg = {
+                    let mut st = app2.state.lock().unwrap();
+                    st.wpd_scanning = false;
+                    match res {
+                        Ok(devs) if devs.is_empty() => {
+                            st.wpd_devices.clear();
+                            "No WPD/MTP devices detected (connect phone in File Transfer/MTP mode or use Offline Fixture)."
+                                .to_string()
+                        }
+                        Ok(devs) => {
+                            let names = devs
+                                .iter()
+                                .map(|d| d.friendly_name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let count = devs.len();
+                            st.wpd_devices = devs;
+                            format!("Detected {count} WPD/MTP device(s): {names}")
+                        }
+                        Err(e) => format!("WPD/MTP device scan: {e}"),
+                    }
+                };
+                app2.set_wpd_status(&msg);
+                Ok(())
+            });
+        });
+    }
+
+    fn run_wpd_search(&self) {
+        let query = match self.build_wpd_query_from_controls() {
+            Ok(q) => q,
+            Err(e) => {
+                self.set_wpd_status(&format!("Query error: {e}"));
+                return;
+            }
+        };
+        let (use_live, dir) = self.current_wpd_source_spec();
+        if !use_live && dir.is_empty() {
+            self.set_wpd_status("Select an Offline Directory Fixture or switch to Live WPD/MTP.");
+            return;
+        }
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.wpd_scanning {
+                return;
+            }
+            st.wpd_scanning = true;
+        }
+        self.set_wpd_status("Searching WPD/MTP objects...");
+
+        let app = self.clone();
+        std::thread::spawn(move || {
+            let source: Box<dyn MtpDeviceSource> = if use_live {
+                Box::new(LiveWpdSource::new())
+            } else {
+                Box::new(DirectoryMtpSource::new(dir))
+            };
+            let res = search_devices(source.as_ref(), &query);
+            let app2 = app.clone();
+            app.wnd.run_ui_thread(move || {
+                let msg = {
+                    let mut st = app2.state.lock().unwrap();
+                    st.wpd_scanning = false;
+                    match res {
+                        Ok(entries) => {
+                            let count = entries.len();
+                            st.wpd_results = entries;
+                            format!("Matched {count} WPD/MTP file(s).")
+                        }
+                        Err(e) => {
+                            st.wpd_results.clear();
+                            format!("WPD/MTP search: {e}")
+                        }
+                    }
+                };
+                app2.refresh_wpd_results_list();
+                app2.set_wpd_status(&msg);
+                Ok(())
+            });
+        });
+    }
+
+    fn run_wpd_copy_out(&self) {
+        {
+            let st = self.state.lock().unwrap();
+            if st.wpd_scanning {
+                return;
+            }
+        }
+
+        let selected_indices: Vec<usize> = self
+            .mobile_pg
+            .results_list
+            .items()
+            .iter_selected()
+            .map(|it| it.index() as usize)
+            .collect();
+
+        let entries: Vec<_> = {
+            let st = self.state.lock().unwrap();
+            if st.wpd_results.is_empty() {
+                drop(st);
+                self.set_wpd_status("No WPD/MTP search results to copy out.");
+                return;
+            }
+            if selected_indices.is_empty() {
+                st.wpd_results.clone()
+            } else {
+                selected_indices
+                    .into_iter()
+                    .filter_map(|i| st.wpd_results.get(i).cloned())
+                    .collect()
+            }
+        };
+
+        let Ok(Some(dest)) = pick_folder(self.wnd.hwnd(), "Select Destination Folder for WPD Copy-Out") else {
+            return;
+        };
+        {
+            let mut st = self.state.lock().unwrap();
+            if st.wpd_scanning {
+                return;
+            }
+            st.wpd_scanning = true;
+        }
+        let (use_live, dir) = self.current_wpd_source_spec();
+        self.set_wpd_status(&format!("Copying {} file(s) to {}...", entries.len(), dest));
+
+        let app = self.clone();
+        std::thread::spawn(move || {
+            let source: Box<dyn MtpDeviceSource> = if use_live {
+                Box::new(LiveWpdSource::new())
+            } else {
+                Box::new(DirectoryMtpSource::new(dir))
+            };
+            let res = copy_out(
+                source.as_ref(),
+                &entries,
+                std::path::Path::new(&dest),
+                &CopyOutOptions::default(),
+            );
+            let app2 = app.clone();
+            app.wnd.run_ui_thread(move || {
+                {
+                    let mut st = app2.state.lock().unwrap();
+                    st.wpd_scanning = false;
+                }
+                match res {
+                    Ok(recs) => app2.set_wpd_status(&format!("Copied out {} file(s) safely.", recs.len())),
+                    Err(e) => app2.set_wpd_status(&format!("Copy-out error: {e}")),
+                }
+                Ok(())
+            });
+        });
+    }
+
+    fn export_wpd_table(&self, fmt: ExportFormat, default_name: &str, ext: &str, filter: (&str, &str)) {
+        let entries = self.state.lock().unwrap().wpd_results.clone();
+        if entries.is_empty() {
+            self.set_wpd_status("Run a WPD/MTP search before exporting.");
+            return;
+        }
+        if let Ok(Some(path)) = pick_save_file(
+            self.wnd.hwnd(),
+            "Export MobileFileSearch Results",
+            default_name,
+            ext,
+            &[filter],
+        ) {
+            match export_wpd_results(&entries, fmt, &path) {
+                Ok(manifest) => {
+                    self.set_wpd_status(&format!(
+                        "Exported {} (Merkle SHA-256: {}...)",
+                        path.display(),
+                        &manifest.merkle_root_sha256[..16.min(manifest.merkle_root_sha256.len())]
+                    ));
+                }
+                Err(e) => {
+                    let _ = self
+                        .wnd
+                        .hwnd()
+                        .MessageBox(&e.to_string(), "WPD Export Error", co::MB::ICONERROR);
+                }
+            }
+        }
     }
 }

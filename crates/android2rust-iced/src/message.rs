@@ -1,5 +1,7 @@
 use android2rust_core::{AndroidJob, AndroidOperation, RebootTarget, ScheduleCadence};
 use android2rust_report::ReportFormat;
+use android2rust_wpd::{CopyOutRecord, WpdDeviceInfo, WpdObjectEntry};
+use guap_export::ExportFormat;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,6 +14,7 @@ pub enum WorkspaceTab {
     LiveConsole,
     BatchQueue,
     HistoryReports,
+    MobileFileSearch,
 }
 
 impl WorkspaceTab {
@@ -25,6 +28,7 @@ impl WorkspaceTab {
             Self::LiveConsole => "Live Console & Records",
             Self::BatchQueue => "Batch Queue",
             Self::HistoryReports => "History & Reports",
+            Self::MobileFileSearch => "WPD / Mobile Search",
         }
     }
 
@@ -38,7 +42,28 @@ impl WorkspaceTab {
             Self::LiveConsole,
             Self::BatchQueue,
             Self::HistoryReports,
+            Self::MobileFileSearch,
         ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WpdSourceMode {
+    #[default]
+    LiveWpd,
+    OfflineDirectory,
+}
+
+impl WpdSourceMode {
+    pub const ALL: &'static [Self] = &[Self::LiveWpd, Self::OfflineDirectory];
+}
+
+impl fmt::Display for WpdSourceMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LiveWpd => write!(f, "Live WPD/MTP (Windows COM)"),
+            Self::OfflineDirectory => write!(f, "Offline Directory Fixture"),
+        }
     }
 }
 
@@ -262,4 +287,27 @@ pub enum Message {
     SelectHistory(usize),
     ReloadHistoryCommand(usize),
     ClearHistory,
+
+    // WPD / MobileFileSearch
+    WpdSourceModeChanged(WpdSourceMode),
+    WpdFixtureDirChanged(String),
+    WpdBrowseFixtureDir,
+    WpdDeviceFilterChanged(String),
+    WpdPatternChanged(String),
+    WpdToggleRegex(bool),
+    WpdMinSizeChanged(String),
+    WpdMaxSizeChanged(String),
+    WpdCreatedAfterChanged(String),
+    WpdModifiedAfterChanged(String),
+    WpdMimeFilterChanged(String),
+    WpdMaxResultsChanged(String),
+    WpdListDevices,
+    WpdDevicesFinished(Result<Vec<WpdDeviceInfo>, String>),
+    WpdRunSearch,
+    WpdSearchFinished(Result<Vec<WpdObjectEntry>, String>),
+    WpdSortColumn(usize),
+    WpdSelectRow(Option<usize>),
+    WpdCopyOutSelected,
+    WpdCopyOutFinished(Result<Vec<CopyOutRecord>, String>),
+    WpdExport(ExportFormat),
 }

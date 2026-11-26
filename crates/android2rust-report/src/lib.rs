@@ -3,7 +3,12 @@
 pub mod html;
 pub mod json;
 pub mod markdown;
+pub mod table_adapter;
 pub mod timeline;
+
+pub use table_adapter::{
+    export_wpd_results, export_wpd_results_bytes, wpd_devices_to_table_provider, wpd_entries_to_table_provider,
+};
 
 use android2rust_core::{AndroidJob, AndroidOperation, ForensicOptions, ToolFamily, decode_exit_code};
 use android2rust_runner::{AndroidOutputParser, CancelToken, ParsedLineOutcome, RunResult, run_job_blocking};
@@ -420,5 +425,28 @@ package:/data/app/base.apk=com.example.chat
         let utf16_res = parse_log_file_to_run_result(&utf16_path).unwrap();
         assert_eq!(utf16_res.summary.devices_seen, 1);
         assert_eq!(utf16_res.summary.properties_seen, 1);
+
+        let wpd_entry = android2rust_wpd::WpdObjectEntry {
+            device_id: "d1".to_string(),
+            device_name: "Pixel".to_string(),
+            storage_name: "Internal".to_string(),
+            object_id: "o1".to_string(),
+            parent_id: "p0".to_string(),
+            full_path: "/DCIM/=SUM(1,2).jpg".to_string(),
+            filename: "=SUM(1,2).jpg".to_string(),
+            extension: "jpg".to_string(),
+            size_bytes: 512,
+            created_time: None,
+            modified_time: None,
+            content_type: "image/jpeg".to_string(),
+            is_folder: false,
+            can_delete: false,
+        };
+        let wpd_csv = tmp.path().join("wpd_report.csv");
+        let manifest = export_wpd_results(&[wpd_entry], guap_export::ExportFormat::Csv, &wpd_csv).unwrap();
+        assert_eq!(manifest.artifact_count, 1);
+        assert_eq!(manifest.merkle_root_sha256.len(), 64);
+        let csv_body = std::fs::read_to_string(&wpd_csv).unwrap();
+        assert!(csv_body.contains("'=SUM(1,2).jpg"));
     }
 }

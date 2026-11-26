@@ -7,13 +7,23 @@ use android2rust_core::{
     build_shell_script, builtin_presets, decode_status_code, find_preset, format_command_line, init_logging,
     parse_command_line, parse_recipe, read_recipe_bounded, serialize_recipe, validate_job,
 };
-use android2rust_report::{ReportFormat, parse_log_file_with_options, write_report, write_timeline};
+use android2rust_mcp::PolicyMode;
+use android2rust_report::{
+    ReportFormat, export_wpd_results, parse_log_file_with_options, wpd_entries_to_table_provider, write_report,
+    write_timeline,
+};
 use android2rust_runner::{
     CancelToken, RunResult, RunnerEvent, detect_environment, run_job_blocking, spawn_job_runner,
 };
+use android2rust_wpd::{
+    CopyOutOptions, DirectoryMtpSource, LiveWpdSource, MobileFileQuery, MtpDeviceSource, WpdError, copy_out,
+    export_wpd_entries_bytes, search_devices,
+};
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
+use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand};
+use guap_export::{ExportFormat, ExportOptions};
+use guap_table::{TableProvider, TableQuery};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,6 +58,10 @@ pub struct Cli {
     /// Optional log output file path
     #[arg(long, global = true)]
     pub log_file: Option<PathBuf>,
+
+    /// Run WPD/MTP MobileFileSearch directly when no subcommand is specified
+    #[arg(long)]
+    pub mtp: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -87,6 +101,11 @@ pub enum Commands {
     },
     /// Start the Model Context Protocol (MCP) JSON-RPC 2.0 stdio server
     Mcp(McpArgs),
+    /// Search or enumerate Windows Portable Devices (WPD/MTP) and copy out matched files
+    Mtp(MtpArgs),
+    /// Search files across WPD/MTP devices or an offline directory fixture (alias for `mtp search`)
+    #[command(name = "mobile-search")]
+    MobileSearch(MobileSearchArgs),
     /// Launch the desktop GUI (`android2rust-win32` on Windows, `android2rust-iced` on Linux/macOS or with `--iced`)
     Gui(GuiArgs),
 }
@@ -96,6 +115,154 @@ pub struct McpArgs {
     /// Print available MCP tools in JSON Schema format and exit
     #[arg(long)]
     pub tools: bool,
+
+    /// Allow mutating WPD MCP tools (still requires confirm_destructive=true per call)
+    #[arg(long)]
+    pub allow_mutating: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct MtpArgs {
+    #[command(subcommand)]
+    pub action: MtpAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MtpAction {
+    /// Enumerate connected WPD/MTP portable devices and storages
+    Devices {
+        /// Optional offline synthetic MTP directory fixture path
+        #[arg(long, alias = "dir")]
+        source_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Search files across connected WPD/MTP devices or a directory fixture
+    Search(Box<MobileSearchArgs>),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct MobileSearchArgs {
+    /// Optional positional filename/path pattern (glob or regex with --regex)
+    pub pattern_pos: Option<String>,
+
+    /// Filename/path pattern (glob * / ? or regex with --regex)
+    #[arg(long)]
+    pub pattern: Option<String>,
+
+    /// Treat pattern as a regular expression
+    #[arg(long)]
+    pub regex: bool,
+
+    /// Minimum file size in bytes
+    #[arg(long)]
+    pub min_size: Option<u64>,
+
+    /// Maximum file size in bytes
+    #[arg(long)]
+    pub max_size: Option<u64>,
+
+    /// Filter created timestamp >= (RFC3339 or YYYY-MM-DD)
+    #[arg(long)]
+    pub created_after: Option<String>,
+
+    /// Filter created timestamp <= (RFC3339 or YYYY-MM-DD)
+    #[arg(long)]
+    pub created_before: Option<String>,
+
+    /// Filter modified timestamp >= (RFC3339 or YYYY-MM-DD)
+    #[arg(long)]
+    pub modified_after: Option<String>,
+
+    /// Filter modified timestamp <= (RFC3339 or YYYY-MM-DD)
+    #[arg(long)]
+    pub modified_before: Option<String>,
+
+    /// MIME type filter (e.g. image/jpeg or image/*)
+    #[arg(long)]
+    pub mime: Option<String>,
+
+    /// File extension filter (e.g. jpg or .jpg)
+    #[arg(long)]
+    pub ext: Option<String>,
+
+    /// Maximum number of matched results to return
+    #[arg(long)]
+    pub max_results: Option<usize>,
+
+    /// Filter by device ID or friendly name substring
+    #[arg(long)]
+    pub device: Option<String>,
+
+    /// Filter by storage name substring
+    #[arg(long)]
+    pub storage: Option<String>,
+
+    /// Filter by MTP folder path prefix (e.g. /DCIM/Camera)
+    #[arg(long)]
+    pub path_prefix: Option<String>,
+
+    /// Include folder entries in search results
+    #[arg(long)]
+    pub include_folders: bool,
+
+    /// Offline synthetic MTP directory fixture path (uses LiveWpdSource if omitted)
+    #[arg(long, alias = "dir")]
+    pub source_dir: Option<PathBuf>,
+
+    /// Force live Windows WPD COM enumeration (default when --source-dir is omitted)
+    #[arg(long)]
+    pub live: bool,
+
+    /// Path-traversal-safe local destination directory to copy matched files into
+    #[arg(long)]
+    pub copy_out: Option<PathBuf>,
+
+    /// Flatten copied files into --copy-out root instead of preserving MTP subfolders
+    #[arg(long)]
+    pub flatten: bool,
+
+    /// Output/export format: table, csv, tsv, json, jsonl, html, html-vertical, markdown
+    #[arg(long, default_value = "table")]
+    pub format: String,
+
+    /// Optional file path to write exported results + SHA-256/512 Merkle custody manifest
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// Emit JSON output to stdout
+    #[arg(long)]
+    pub json: bool,
+}
+
+impl Default for MobileSearchArgs {
+    fn default() -> Self {
+        Self {
+            pattern_pos: None,
+            pattern: None,
+            regex: false,
+            min_size: None,
+            max_size: None,
+            created_after: None,
+            created_before: None,
+            modified_after: None,
+            modified_before: None,
+            mime: None,
+            ext: None,
+            max_results: None,
+            device: None,
+            storage: None,
+            path_prefix: None,
+            include_folders: false,
+            source_dir: None,
+            live: false,
+            copy_out: None,
+            flatten: false,
+            format: "table".to_string(),
+            output: None,
+            json: false,
+        }
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -602,6 +769,9 @@ fn main() {
 
 fn run_cli(cli: Cli) -> Result<i32> {
     let Some(command) = cli.command else {
+        if cli.mtp {
+            return execute_mtp_search(&MobileSearchArgs::default());
+        }
         launch_gui(&GuiArgs::default())?;
         return Ok(0);
     };
@@ -919,14 +1089,198 @@ fn run_cli(cli: Cli) -> Result<i32> {
                 println!("{}", serde_json::to_string_pretty(&manifest)?);
                 return Ok(0);
             }
-            android2rust_mcp::run_stdio_server().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let policy = if args.allow_mutating {
+                PolicyMode::AllowMutating
+            } else {
+                PolicyMode::ReadOnlyOnly
+            };
+            android2rust_mcp::run_stdio_server_with_policy(policy).map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(0)
         }
+        Commands::Mtp(mtp) => match mtp.action {
+            MtpAction::Devices {
+                source_dir,
+                json: as_json,
+            } => execute_mtp_devices(source_dir.as_deref(), as_json),
+            MtpAction::Search(args) => execute_mtp_search(&args),
+        },
+        Commands::MobileSearch(args) => execute_mtp_search(&args),
         Commands::Gui(g) => {
             launch_gui(&g)?;
             Ok(0)
         }
     }
+}
+
+fn parse_cli_datetime(raw: Option<&str>) -> Result<Option<DateTime<Utc>>> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(Some(dt.with_timezone(&Utc)));
+    }
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        && let Some(ndt) = d.and_hms_opt(0, 0, 0)
+    {
+        return Ok(Some(ndt.and_utc()));
+    }
+    bail!("Invalid timestamp '{s}'; expected RFC3339 or YYYY-MM-DD")
+}
+
+fn select_cli_wpd_source(source_dir: Option<&Path>, force_live: bool) -> Box<dyn MtpDeviceSource> {
+    if !force_live && let Some(dir) = source_dir {
+        Box::new(DirectoryMtpSource::new(dir))
+    } else {
+        Box::new(LiveWpdSource::new())
+    }
+}
+
+fn print_wpd_unavailable(err: &WpdError, as_json: bool) -> Result<i32> {
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "status": "unavailable",
+                "error": err.to_string(),
+                "devices": [],
+                "results": []
+            }))?
+        );
+    } else {
+        eprintln!("WPD/MTP unavailable: {err}");
+    }
+    Ok(1)
+}
+
+fn execute_mtp_devices(source_dir: Option<&Path>, as_json: bool) -> Result<i32> {
+    let src = select_cli_wpd_source(source_dir, false);
+    match src.list_devices() {
+        Ok(devices) => {
+            if devices.is_empty() {
+                return print_wpd_unavailable(&WpdError::NoDevices, as_json);
+            }
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&devices)?);
+            } else {
+                for d in &devices {
+                    println!("{} | {} | {}", d.id, d.friendly_name, d.manufacturer);
+                    for s in &d.storages {
+                        println!("  - Storage: {} (id={}, fs={})", s.name, s.object_id, s.file_system);
+                    }
+                }
+            }
+            Ok(0)
+        }
+        Err(err @ (WpdError::NoDevices | WpdError::UnsupportedPlatform | WpdError::AccessDenied(_))) => {
+            print_wpd_unavailable(&err, as_json)
+        }
+        Err(err) => Err(anyhow::anyhow!("{err}")),
+    }
+}
+
+fn execute_mtp_search(args: &MobileSearchArgs) -> Result<i32> {
+    let effective_pattern = args
+        .pattern
+        .as_deref()
+        .or(args.pattern_pos.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let query = MobileFileQuery {
+        device_filter: args.device.clone(),
+        storage_filter: args.storage.clone(),
+        path_prefix: args.path_prefix.clone(),
+        pattern: effective_pattern,
+        use_regex: args.regex,
+        min_size: args.min_size,
+        max_size: args.max_size,
+        created_after: parse_cli_datetime(args.created_after.as_deref())?,
+        created_before: parse_cli_datetime(args.created_before.as_deref())?,
+        modified_after: parse_cli_datetime(args.modified_after.as_deref())?,
+        modified_before: parse_cli_datetime(args.modified_before.as_deref())?,
+        content_type: args.mime.clone(),
+        extension: args.ext.clone(),
+        include_folders: args.include_folders,
+        max_results: args.max_results,
+    };
+    query.validate().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let source = select_cli_wpd_source(args.source_dir.as_deref(), args.live);
+    let entries = match search_devices(source.as_ref(), &query) {
+        Ok(list) => list,
+        Err(err @ (WpdError::NoDevices | WpdError::UnsupportedPlatform | WpdError::AccessDenied(_))) => {
+            return print_wpd_unavailable(&err, args.json);
+        }
+        Err(err) => return Err(anyhow::anyhow!("{err}")),
+    };
+
+    let copied = if let Some(dest) = &args.copy_out {
+        let opts = CopyOutOptions {
+            preserve_tree: !args.flatten,
+            overwrite: false,
+            max_copy_bytes: None,
+        };
+        Some(copy_out(source.as_ref(), &entries, dest, &opts).map_err(|e| anyhow::anyhow!("{e}"))?)
+    } else {
+        None
+    };
+
+    let custody = if let Some(out_path) = &args.output {
+        let fmt = if args.format.trim().is_empty() || args.format.trim().eq_ignore_ascii_case("table") {
+            ExportFormat::Csv
+        } else {
+            ExportFormat::parse(&args.format).map_err(|e| anyhow::anyhow!("{e}"))?
+        };
+        Some(export_wpd_results(&entries, fmt, out_path)?)
+    } else {
+        None
+    };
+
+    if args.json {
+        let provider = wpd_entries_to_table_provider(&entries);
+        let table = provider.query(&TableQuery::default())?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "status": "ok",
+                "matched_count": entries.len(),
+                "entries": entries,
+                "table_total_rows": table.total_rows,
+                "copied": copied,
+                "custody_manifest": custody,
+            }))?
+        );
+    } else if !args.format.trim().is_empty()
+        && !args.format.trim().eq_ignore_ascii_case("table")
+        && args.output.is_none()
+    {
+        let fmt = ExportFormat::parse(&args.format).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let bytes =
+            export_wpd_entries_bytes(&entries, fmt, &ExportOptions::default()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("{}", String::from_utf8_lossy(&bytes));
+    } else {
+        println!("Matched {} WPD/MTP object(s):", entries.len());
+        for e in &entries {
+            println!(
+                "  [{}] {} | {} | {} | {} bytes | {}",
+                e.device_name, e.storage_name, e.full_path, e.object_id, e.size_bytes, e.content_type
+            );
+        }
+        if let Some(records) = &copied {
+            println!("Copied out {} file(s):", records.len());
+            for r in records {
+                println!("  -> {} ({} bytes)", r.destination_path.display(), r.bytes_written);
+            }
+        }
+        if let Some(m) = &custody {
+            println!("Exported {} artifact(s)", m.artifact_count);
+            println!("Merkle SHA-256 : {}", m.merkle_root_sha256);
+            println!("Merkle SHA-512 : {}", m.merkle_root_sha512);
+        }
+    }
+
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -1048,5 +1402,93 @@ mod tests {
             }
             other => panic!("Unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_parses_mtp_and_mobile_search_and_runs_offline_fixture() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dcim = tmp.path().join("DCIM");
+        let out_csv = tmp.path().join("results.csv");
+        let copy_dir = tmp.path().join("copied");
+        std::fs::create_dir_all(&dcim).unwrap();
+        std::fs::write(dcim.join("photo.jpg"), b"jpeg-bytes").unwrap();
+        std::fs::write(dcim.join("doc.txt"), b"text-bytes").unwrap();
+
+        let cli = Cli::try_parse_from([
+            "android2rust",
+            "mtp",
+            "search",
+            "--source-dir",
+            &tmp.path().display().to_string(),
+            "--pattern",
+            "*.jpg",
+            "--copy-out",
+            &copy_dir.display().to_string(),
+            "--format",
+            "csv",
+            "--output",
+            &out_csv.display().to_string(),
+        ])
+        .unwrap();
+        assert_eq!(run_cli(cli).unwrap(), 0);
+        assert!(copy_dir.join("DCIM").join("photo.jpg").is_file());
+        assert!(!copy_dir.join("DCIM").join("doc.txt").exists());
+        assert!(out_csv.is_file());
+
+        let alias_cli = Cli::try_parse_from([
+            "android2rust",
+            "mobile-search",
+            "--source-dir",
+            &tmp.path().display().to_string(),
+            "--ext",
+            "txt",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(run_cli(alias_cli).unwrap(), 0);
+
+        let mtp_flag_cli = Cli::try_parse_from(["android2rust", "--mtp"]).unwrap();
+        assert!(mtp_flag_cli.mtp);
+
+        let mcp_cli = Cli::try_parse_from(["android2rust", "mcp", "--allow-mutating"]).unwrap();
+        match mcp_cli.command {
+            Some(Commands::Mcp(m)) => assert!(m.allow_mutating),
+            other => panic!("Unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mobile_search_args_default_format_succeeds_on_source_dir() {
+        assert_eq!(MobileSearchArgs::default().format, "table");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dcim = tmp.path().join("DCIM").join("Camera");
+        std::fs::create_dir_all(&dcim).unwrap();
+        std::fs::write(dcim.join("IMG_0042.jpg"), b"jpeg-bytes").unwrap();
+
+        let default_args = MobileSearchArgs {
+            source_dir: Some(tmp.path().to_path_buf()),
+            ..Default::default()
+        };
+        assert_eq!(execute_mtp_search(&default_args).unwrap(), 0);
+
+        let empty_format_args = MobileSearchArgs {
+            source_dir: Some(tmp.path().to_path_buf()),
+            format: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(execute_mtp_search(&empty_format_args).unwrap(), 0);
+
+        let regex_cli = Cli::try_parse_from([
+            "android2rust",
+            "mobile-search",
+            "--source-dir",
+            &tmp.path().display().to_string(),
+            "--regex",
+            "--pattern",
+            r"^IMG_\d{4}\.jpg$",
+        ])
+        .unwrap();
+        assert_eq!(run_cli(regex_cli).unwrap(), 0);
     }
 }

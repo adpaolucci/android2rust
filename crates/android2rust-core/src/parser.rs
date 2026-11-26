@@ -162,6 +162,95 @@ pub fn parse_command_line(input: &str) -> ParseResult {
     }
 
     let sub = tokens.get(idx).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
+    if (job.tool == ToolFamily::Forensics && (sub == "mtp" || sub == "mobile-search"))
+        || sub == "mtp"
+        || sub == "mobile-search"
+    {
+        job.tool = ToolFamily::Wpd;
+        job.operation = AndroidOperation::MobileFileSearch;
+        job.name = "Parsed Mobile File Search".to_string();
+        job.description = format!("Imported command: {}", job.operation.label());
+        let mut r = idx + 1;
+        if sub == "mtp"
+            && tokens
+                .get(r)
+                .is_some_and(|t| t.eq_ignore_ascii_case("search") || t.eq_ignore_ascii_case("devices"))
+        {
+            r += 1;
+        }
+        let rest = &tokens[r..];
+        let mut i = 0;
+        while i < rest.len() {
+            match rest[i].as_str() {
+                "--pattern" if i + 1 < rest.len() => {
+                    job.wpd_opts.pattern = rest[i + 1].clone();
+                    i += 2;
+                }
+                "--regex" => {
+                    job.wpd_opts.use_regex = true;
+                    i += 1;
+                }
+                "--min-size" if i + 1 < rest.len() => {
+                    job.wpd_opts.min_size = rest[i + 1].parse().ok();
+                    i += 2;
+                }
+                "--max-size" if i + 1 < rest.len() => {
+                    job.wpd_opts.max_size = rest[i + 1].parse().ok();
+                    i += 2;
+                }
+                "--created-after" if i + 1 < rest.len() => {
+                    job.wpd_opts.created_after = Some(rest[i + 1].clone());
+                    i += 2;
+                }
+                "--created-before" if i + 1 < rest.len() => {
+                    job.wpd_opts.created_before = Some(rest[i + 1].clone());
+                    i += 2;
+                }
+                "--modified-after" if i + 1 < rest.len() => {
+                    job.wpd_opts.modified_after = Some(rest[i + 1].clone());
+                    i += 2;
+                }
+                "--modified-before" if i + 1 < rest.len() => {
+                    job.wpd_opts.modified_before = Some(rest[i + 1].clone());
+                    i += 2;
+                }
+                "--mime" | "--ext" | "--content-type" if i + 1 < rest.len() => {
+                    job.wpd_opts.mime_or_ext = Some(rest[i + 1].clone());
+                    i += 2;
+                }
+                "--max-results" if i + 1 < rest.len() => {
+                    job.wpd_opts.max_results = rest[i + 1].parse().ok();
+                    i += 2;
+                }
+                "--device" if i + 1 < rest.len() => {
+                    job.wpd_opts.device_filter = Some(rest[i + 1].clone());
+                    i += 2;
+                }
+                "--source-dir" | "--dir" if i + 1 < rest.len() => {
+                    job.wpd_opts.offline_source_dir = Some(rest[i + 1].clone());
+                    job.source_path = rest[i + 1].clone();
+                    i += 2;
+                }
+                "--copy-out" if i + 1 < rest.len() => {
+                    job.wpd_opts.copy_out_dir = Some(rest[i + 1].clone());
+                    job.target_path = rest[i + 1].clone();
+                    i += 2;
+                }
+                other if !other.starts_with('-') && job.wpd_opts.pattern.is_empty() => {
+                    job.wpd_opts.pattern = other.to_string();
+                    i += 1;
+                }
+                other => {
+                    unrecognized.push(other.to_string());
+                    i += 1;
+                }
+            }
+        }
+        return ParseResult {
+            job,
+            unrecognized_tokens: unrecognized,
+        };
+    }
     if (job.tool == ToolFamily::Forensics && (sub.is_empty() || sub == "inspect")) || sub == "inspect" {
         job.tool = ToolFamily::Forensics;
         job.operation = AndroidOperation::InspectArtifact;
@@ -635,5 +724,48 @@ mod tests {
         let non_inspect = parse_command_line("android2rust run --preset device-triage");
         assert_ne!(non_inspect.job.operation, AndroidOperation::InspectArtifact);
         assert!(!non_inspect.unrecognized_tokens.is_empty());
+    }
+
+    #[test]
+    fn parses_wpd_mtp_search_command_roundtrip() {
+        let parsed = parse_command_line(
+            r#"android2rust mtp search --pattern "*.jpg" --min-size 1024 --created-after 2026-01-01 --created-before 2026-06-01 --modified-after 2026-02-01T00:00:00Z --modified-before 2026-07-01T00:00:00Z --mime image/jpeg --source-dir "C:\MtpFixture""#,
+        );
+        assert!(
+            parsed.unrecognized_tokens.is_empty(),
+            "{:?}",
+            parsed.unrecognized_tokens
+        );
+        assert_eq!(parsed.job.tool, ToolFamily::Wpd);
+        assert_eq!(parsed.job.operation, AndroidOperation::MobileFileSearch);
+        assert_eq!(parsed.job.wpd_opts.pattern, "*.jpg");
+        assert_eq!(parsed.job.wpd_opts.min_size, Some(1024));
+        assert_eq!(parsed.job.wpd_opts.created_after.as_deref(), Some("2026-01-01"));
+        assert_eq!(parsed.job.wpd_opts.created_before.as_deref(), Some("2026-06-01"));
+        assert_eq!(
+            parsed.job.wpd_opts.modified_after.as_deref(),
+            Some("2026-02-01T00:00:00Z")
+        );
+        assert_eq!(
+            parsed.job.wpd_opts.modified_before.as_deref(),
+            Some("2026-07-01T00:00:00Z")
+        );
+        assert_eq!(parsed.job.wpd_opts.mime_or_ext.as_deref(), Some("image/jpeg"));
+        assert_eq!(
+            parsed.job.wpd_opts.offline_source_dir.as_deref(),
+            Some(r"C:\MtpFixture")
+        );
+        let formatted = format_command_line(&parsed.job);
+        assert!(formatted.contains("android2rust mtp search"));
+        assert!(formatted.contains("--pattern *.jpg"));
+        assert!(formatted.contains("--min-size 1024"));
+        assert!(formatted.contains("--created-after 2026-01-01"));
+        assert!(formatted.contains("--created-before 2026-06-01"));
+        assert!(formatted.contains("--modified-after 2026-02-01T00:00:00Z"));
+        assert!(formatted.contains("--modified-before 2026-07-01T00:00:00Z"));
+
+        let reparsed = parse_command_line(&formatted);
+        assert!(reparsed.unrecognized_tokens.is_empty());
+        assert_eq!(reparsed.job.wpd_opts, parsed.job.wpd_opts);
     }
 }

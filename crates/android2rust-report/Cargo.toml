@@ -11,6 +11,9 @@ description = "Self-contained offline HTML, JSON, and Markdown audit report gene
 [dependencies]
 android2rust-core.workspace = true
 android2rust-runner.workspace = true
+android2rust-wpd.workspace = true
+guap-table.workspace = true
+guap-export.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true
