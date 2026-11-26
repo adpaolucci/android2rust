@@ -41,7 +41,7 @@ pub fn view_mobile_search(app: &App) -> Element<'_, Message> {
     .spacing(6)
     .align_y(Alignment::Center);
 
-    let header = page_header("MobileFileSearch (WPD / MTP)", hdr_controls);
+    let header = page_header("WPD/MTP File Search", hdr_controls);
 
     let source_card = section_card(
         "WPD / MTP Source & Query Filters",

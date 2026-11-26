@@ -3598,7 +3598,7 @@ impl Win32App {
         }
         if let Ok(Some(path)) = pick_save_file(
             self.wnd.hwnd(),
-            "Export MobileFileSearch Results",
+            "Export WPD/MTP File Search Results",
             default_name,
             ext,
             &[filter],

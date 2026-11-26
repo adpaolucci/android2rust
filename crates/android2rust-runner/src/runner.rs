@@ -224,7 +224,7 @@ fn execute_job_internal(
         return execute_dry_run_simulation(job, &args, &command_line, &started_at, timer, &mut emit);
     }
 
-    // 2b. WPD / MTP MobileFileSearch (Windows COM or offline directory fixture)
+    // 2b. WPD / MTP File Search (Windows COM or offline directory fixture)
     if job.operation == AndroidOperation::MobileFileSearch || job.tool == ToolFamily::Wpd {
         return execute_wpd_job(job, &args, &command_line, &started_at, timer, &mut emit);
     }
@@ -796,7 +796,7 @@ fn execute_wpd_job(
             let mut total_bytes = 0u64;
 
             log_lines.push(format!(
-                "WPD/MTP MobileFileSearch matched {} object(s) from {}.",
+                "WPD/MTP File Search matched {} object(s) from {}.",
                 entries.len(),
                 source_dir.unwrap_or("live WPD/MTP devices")
             ));

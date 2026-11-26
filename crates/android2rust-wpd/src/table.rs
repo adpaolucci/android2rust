@@ -12,7 +12,7 @@ use crate::model::{WpdDeviceInfo, WpdObjectEntry};
 pub fn mobile_file_search_schema() -> TableSchema {
     TableSchema::new(
         "mobile_file_search",
-        "MobileFileSearch (WPD/MTP)",
+        "WPD/MTP File Search",
         vec![
             ColumnDef::new("device_name", "DeviceName", ColumnType::Text).with_width_hint(140),
             ColumnDef::new("storage_name", "StorageName", ColumnType::Text).with_width_hint(130),

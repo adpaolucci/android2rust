@@ -288,7 +288,7 @@ pub enum Message {
     ReloadHistoryCommand(usize),
     ClearHistory,
 
-    // WPD / MobileFileSearch
+    // WPD / MTP File Search
     WpdSourceModeChanged(WpdSourceMode),
     WpdFixtureDirChanged(String),
     WpdBrowseFixtureDir,

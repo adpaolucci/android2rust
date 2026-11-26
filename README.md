@@ -42,7 +42,7 @@ android2rust/
 ├── crates/
 │   ├── android2rust-core/             # Job schema, quoting, CLI & .a2r parser, validator, status decoder, pure-Rust APK/.ab/SQLite forensics, presets, profiles
 │   ├── android2rust-runner/           # Platform-Tools probe (adb/fastboot), CREATE_NO_WINDOW streaming executor, dry-run & offline forensic runner, SHA-256
-│   ├── android2rust-wpd/              # MobileFileSearch: Windows Portable Devices (WPD/MTP) enumerator, search, safe copy-out, guap-table & offline fixtures
+│   ├── android2rust-wpd/              # WPD/MTP File Search: Windows Portable Devices (WPD/MTP) enumerator, search, safe copy-out, guap-table & offline fixtures
 │   ├── android2rust-report/           # Self-contained offline HTML, JSON, and Markdown audit reports + guap-export adapter
 │   ├── android2rust-mcp/              # Model Context Protocol (MCP) JSON-RPC 2.0 stdio server (`android2rust-mcp`, 13 tools)
 │   ├── android2rust-cli/              # Unified CLI (`android2rust`): presets, build, parse, decode, inspect, dry-run, run, profile, report, env, mtp, mcp, gui
@@ -106,7 +106,7 @@ android2rust run --preset fastboot-flash-image --source "C:\Images\boot.img" --t
 # Convert an existing log file or artifact into HTML, JSON, Markdown, or timeline reports
 android2rust report --log-file logcat.txt --output ./audit_bundle --format all --timeline events.jsonl
 
-# MobileFileSearch (WPD/MTP live devices or deterministic offline --source-dir fixture)
+# WPD/MTP File Search (live devices or deterministic offline --source-dir fixture)
 android2rust mtp devices --json
 android2rust mtp search --source-dir .\wpd_fixture --format csv --output .\mobile_files.csv --json
 

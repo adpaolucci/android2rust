@@ -59,7 +59,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub log_file: Option<PathBuf>,
 
-    /// Run WPD/MTP MobileFileSearch directly when no subcommand is specified
+    /// Run WPD/MTP File Search directly when no subcommand is specified
     #[arg(long)]
     pub mtp: bool,
 

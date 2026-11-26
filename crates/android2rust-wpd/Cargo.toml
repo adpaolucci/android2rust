@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Windows Portable Devices (WPD/MTP) MobileFileSearch COM backend, offline directory/mock sources, path-safe copy-out, and guap-table/guap-export adapters for android2rust"
+description = "Windows Portable Devices (WPD/MTP) File Search COM backend, offline directory/mock sources, path-safe copy-out, and guap-table/guap-export adapters for android2rust"
 
 [dependencies]
 guap-table.workspace = true

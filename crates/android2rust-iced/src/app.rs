@@ -96,7 +96,7 @@ pub struct App {
     pub task_sched_spec: ScheduleSpec,
     pub status_code_input: String,
 
-    // WPD / MobileFileSearch
+    // WPD / MTP File Search
     pub wpd_source_mode: WpdSourceMode,
     pub wpd_fixture_dir: String,
     pub wpd_device_filter: String,
@@ -1087,7 +1087,7 @@ impl App {
                 self.selected_history_idx = None;
             }
 
-            // WPD / MobileFileSearch
+            // WPD / MTP File Search
             Message::WpdSourceModeChanged(m) => self.wpd_source_mode = m,
             Message::WpdFixtureDirChanged(s) => self.wpd_fixture_dir = s,
             Message::WpdBrowseFixtureDir => {
@@ -1286,7 +1286,7 @@ impl App {
                 let ext = fmt.extension();
                 let default_name = format!("mobile_file_search.{ext}");
                 if let Some(path) = rfd::FileDialog::new()
-                    .set_title("Export MobileFileSearch Results")
+                    .set_title("Export WPD/MTP File Search Results")
                     .set_file_name(&default_name)
                     .add_filter(fmt.to_string(), &[ext])
                     .save_file()

@@ -239,7 +239,7 @@ impl AndroidOperation {
     pub fn from_slug(raw: &str) -> Option<Self> {
         let norm = raw.trim().to_ascii_lowercase();
         match norm.as_str() {
-            "mobile-search" | "mobile-file-search" | "mobilefilesearch" | "wpd-search" => Some(Self::MobileFileSearch),
+            "mobile-search" | "mobile-file-search" | "wpd-search" => Some(Self::MobileFileSearch),
             _ => Self::ALL.iter().copied().find(|op| op.slug() == norm),
         }
     }

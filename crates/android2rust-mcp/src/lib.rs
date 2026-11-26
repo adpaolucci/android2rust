@@ -16,7 +16,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use guap_export::{ExportFormat, ExportOptions};
 pub use guap_mcp::PolicyMode;
 use guap_mcp::{ActionCommand, ActionRiskLevel, McpServerRegistry, McpToolError};
-use guap_table::{GetNirQuery, SortDirection, TableData, TableProvider, TableQuery, TableSchema};
+use guap_table::{GuapQuery, SortDirection, TableData, TableProvider, TableQuery, TableSchema};
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -228,7 +228,7 @@ impl ActionCommand for WpdDevicesAction {
             "type": "object",
             "properties": {
                 "source_dir": { "type": "string", "description": "Optional offline synthetic MTP directory fixture path" },
-                "filter": { "type": "string", "description": "Optional GetNir filter expression over device columns" },
+                "filter": { "type": "string", "description": "Optional tabular query filter expression over device columns" },
                 "offset": { "type": "integer", "minimum": 0 },
                 "limit": { "type": "integer", "minimum": 1 }
             }
@@ -300,8 +300,8 @@ impl ActionCommand for MobileFileSearchAction {
                 "overwrite": { "type": "boolean", "default": false },
                 "export_path": { "type": "string", "description": "Optional path for guap-export output" },
                 "export_format": { "type": "string", "description": "csv, tsv, json, jsonl, html, html-vertical, or markdown" },
-                "filter": { "type": "string", "description": "Optional GetNir filter over MobileFileSearch columns" },
-                "sort": { "type": "string", "description": "Optional GetNir sort spec (e.g. 'size_bytes desc')" },
+                "filter": { "type": "string", "description": "Optional tabular query filter over WPD/MTP File Search columns" },
+                "sort": { "type": "string", "description": "Optional tabular query sort spec (e.g. 'size_bytes desc')" },
                 "columns": { "type": "array", "items": { "type": "string" } },
                 "offset": { "type": "integer", "minimum": 0 },
                 "limit": { "type": "integer", "minimum": 1 }
@@ -475,12 +475,12 @@ fn parse_mcp_dt(raw: Option<&str>) -> Result<Option<DateTime<Utc>>, McpToolError
 
 fn parse_mcp_table_query(schema: &TableSchema, args: &Value) -> Result<TableQuery, McpToolError> {
     let filter = match args["filter"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(f) => Some(GetNirQuery::parse_filter(f)?),
+        Some(f) => Some(GuapQuery::parse_filter(f)?),
         None => None,
     };
     let sort = match args["sort"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
         Some(spec) => {
-            let parsed = GetNirQuery::parse_sort(spec)?;
+            let parsed = GuapQuery::parse_sort(spec)?;
             let mut out = Vec::with_capacity(parsed.len());
             for (col, dir) in parsed {
                 let idx = schema
