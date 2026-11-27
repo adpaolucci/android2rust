@@ -33,11 +33,25 @@ const WPD_TOOL_NAMES: &[&str] = &[
     "android2rust_wpd_delete",
 ];
 
+const LEGACY_TOOL_NAMES: &[&str] = &[
+    "android2rust_environment",
+    "android2rust_presets",
+    "android2rust_build_command",
+    "android2rust_parse_command",
+    "android2rust_decode_status",
+    "android2rust_profiles",
+    "android2rust_inspect_artifact",
+    "android2rust_dry_run",
+    "android2rust_run",
+    "android2rust_report",
+];
+
 fn get_legacy_tools_manifest() -> Value {
     json!([
         {
             "name": "android2rust_environment",
             "description": "Detect host OS, adb and fastboot binary availability, versions, and configuration directory.",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false },
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -46,6 +60,7 @@ fn get_legacy_tools_manifest() -> Value {
         {
             "name": "android2rust_presets",
             "description": "List all 8 built-in ADB, Fastboot, and offline Android forensic inspection presets.",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false },
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -54,6 +69,7 @@ fn get_legacy_tools_manifest() -> Value {
         {
             "name": "android2rust_build_command",
             "description": "Build a validated ADB/Fastboot/Forensics command line plus optional .a2r, .bat, .ps1, .sh, and schtasks commands.",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false },
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -75,6 +91,7 @@ fn get_legacy_tools_manifest() -> Value {
         {
             "name": "android2rust_parse_command",
             "description": "Parse a raw adb/fastboot command line or an .a2r recipe file path into a structured AndroidJob and validation diagnostics.",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false },
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -86,6 +103,7 @@ fn get_legacy_tools_manifest() -> Value {
         {
             "name": "android2rust_decode_status",
             "description": "Decode an Android/ADB/Fastboot exit code or status string (e.g., INSTALL_FAILED_*, DEVICE_UNAUTHORIZED, FASTBOOT_LOCKED).",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false },
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -97,6 +115,7 @@ fn get_legacy_tools_manifest() -> Value {
         {
             "name": "android2rust_profiles",
             "description": "Manage saved persistent Android2Rust job profiles (list, get, save, delete).",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false },
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -112,6 +131,7 @@ fn get_legacy_tools_manifest() -> Value {
         {
             "name": "android2rust_inspect_artifact",
             "description": "Run pure-Rust offline forensic inspection on a local .apk, .ab (optionally decrypted), SQLite .db, ABX, bugreport .zip, XML, directory, or log dump.",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false },
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -128,6 +148,7 @@ fn get_legacy_tools_manifest() -> Value {
         {
             "name": "android2rust_dry_run",
             "description": "Run a safe non-destructive pre-flight simulation (plus local artifact verification) without modifying connected Android devices.",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false },
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -149,6 +170,7 @@ fn get_legacy_tools_manifest() -> Value {
         {
             "name": "android2rust_run",
             "description": "Execute an ADB, Fastboot, or forensic job. Refuses destructive operations (flash, erase, format, unlock, uninstall, restore) unless confirm_destructive is true.",
+            "annotations": { "readOnlyHint": false, "destructiveHint": true },
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -171,6 +193,7 @@ fn get_legacy_tools_manifest() -> Value {
         {
             "name": "android2rust_report",
             "description": "Generate an air-gapped offline HTML, JSON, Markdown, or timeline audit report from an artifact, log file, or dry-run job.",
+            "annotations": { "readOnlyHint": true, "destructiveHint": false },
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -895,12 +918,63 @@ pub fn handle_jsonrpc_request_with_policy(req: &Value, policy: PolicyMode) -> Op
             }
         })),
         "tools/call" => {
-            let params = &req["params"];
-            let tool_name = params["name"].as_str().unwrap_or("");
+            let Some(params) = req.get("params").and_then(Value::as_object) else {
+                return id.map(|req_id| {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "Invalid params: params must be a JSON object"
+                        }
+                    })
+                });
+            };
+            let Some(tool_name) = params.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+                return id.map(|req_id| {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "Invalid params: missing tool 'name'"
+                        }
+                    })
+                });
+            };
             if WPD_TOOL_NAMES.contains(&tool_name) {
                 return build_wpd_registry(policy).handle_jsonrpc_request(req);
             }
-            let args = &params["arguments"];
+            if !LEGACY_TOOL_NAMES.contains(&tool_name) {
+                return id.map(|req_id| {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32601,
+                            "message": format!("Unknown tool: {tool_name}")
+                        }
+                    })
+                });
+            }
+            let raw_args = params.get("arguments");
+            if let Some(a) = raw_args
+                && !a.is_object()
+                && !a.is_null()
+            {
+                return id.map(|req_id| {
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32602,
+                            "message": "Invalid params: arguments must be a JSON object"
+                        }
+                    })
+                });
+            }
+            let default_args = json!({});
+            let args = raw_args.unwrap_or(&default_args);
             let (text, is_err) = match call_tool(tool_name, args) {
                 Ok(val) => (serde_json::to_string_pretty(&val).unwrap_or_default(), false),
                 Err(msg) => (msg, true),
@@ -1027,6 +1101,45 @@ mod tests {
         let del_tool = tools.iter().find(|t| t["name"] == "android2rust_wpd_delete").unwrap();
         assert_eq!(del_tool["annotations"]["readOnlyHint"], false);
         assert_eq!(del_tool["annotations"]["destructiveHint"], true);
+
+        let ro_count = tools
+            .iter()
+            .filter(|t| t["annotations"]["readOnlyHint"].as_bool() == Some(true))
+            .count();
+        let mut_count = tools
+            .iter()
+            .filter(|t| t["annotations"]["readOnlyHint"].as_bool() == Some(false))
+            .count();
+        assert_eq!(ro_count, 11);
+        assert_eq!(mut_count, 2);
+        for t in tools {
+            assert!(t["annotations"]["readOnlyHint"].is_boolean());
+            assert!(t["annotations"]["destructiveHint"].is_boolean());
+        }
+
+        let bad_args = handle_jsonrpc_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 90,
+            "method": "tools/call",
+            "params": {
+                "name": "android2rust_presets",
+                "arguments": "not_object"
+            }
+        }))
+        .unwrap();
+        assert_eq!(bad_args["error"]["code"], -32602);
+
+        let unknown_tool = handle_jsonrpc_request(&json!({
+            "jsonrpc": "2.0",
+            "id": 91,
+            "method": "tools/call",
+            "params": {
+                "name": "__nonexistent_android_tool",
+                "arguments": {}
+            }
+        }))
+        .unwrap();
+        assert_eq!(unknown_tool["error"]["code"], -32601);
     }
 
     #[test]
