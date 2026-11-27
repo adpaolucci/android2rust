@@ -1,6 +1,6 @@
 # `android2rust` — Pure-Rust Native Win32 & Cross-Platform Iced ADB/Fastboot GUI, Offline Forensics Workstation, CLI & MCP Server
 
-Part of the **GUAP** Ecosystem (`guap.ca`) • [**Project Hub & Web Documentation: https://android2rust.guap.ca**](https://android2rust.guap.ca) • [**Project Wiki**](https://github.com/adpaolucci/android2rust/wiki)
+Part of the **GUAP** Ecosystem (`guap.ca`) • [**Project Hub & Web Documentation: https://guap.ca/android2rust/**](https://guap.ca/android2rust/) • [**Project Wiki**](https://github.com/adpaolucci/android2rust/wiki)
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/adpaolucci/android2rust/actions/workflows/ci.yml/badge.svg)](https://github.com/adpaolucci/android2rust/actions/workflows/ci.yml)

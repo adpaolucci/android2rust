@@ -1,6 +1,6 @@
 class Android2rust < Formula
   desc "Pure-Rust Iced GUI, ADB/Fastboot device orchestrator, offline APK/.ab/SQLite forensics workstation, and MCP server"
-  homepage "https://android2rust.guap.ca"
+  homepage "https://guap.ca/android2rust/"
   version "0.1.0"
   license "Apache-2.0"
 
