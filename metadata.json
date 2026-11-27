@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "100% pure-Rust native Win32 (WinSafe) & cross-platform Iced ADB/Fastboot GUI wrapper, device orchestrator, offline Android forensics workstation, CLI, and MCP server.",
   "repository": "https://github.com/adpaolucci/android2rust",
-  "homepage": "https://android2rust.guap.ca",
+  "homepage": "https://guap.ca/android2rust/",
   "license": "Apache-2.0",
   "binaries": [
     "android2rust",
@@ -17,6 +17,74 @@
     "Offline DFIR forensics (.apk AXML/ABX0, bugreport.zip, encrypted .ab PBKDF2/AES-256-CBC, SQLite .db)",
     "Dual SHA-256 + SHA-512 chain-of-custody & timeline CSV/JSONL exports",
     "Native Win32 (WinSafe) & Iced 0.14 dual GUIs",
-    "10-tool MCP JSON-RPC stdio server with destructive safety guards"
+    "13-tool MCP JSON-RPC stdio server with destructive safety guards"
+  ],
+  "mcp_tools_count": 13,
+  "tools": [
+    {
+      "id": "android2rust_environment",
+      "readOnly": true,
+      "summary": "Detect host OS, adb and fastboot binary availability, versions, and configuration directory."
+    },
+    {
+      "id": "android2rust_presets",
+      "readOnly": true,
+      "summary": "List all 8 built-in ADB, Fastboot, and offline Android forensic inspection presets."
+    },
+    {
+      "id": "android2rust_build_command",
+      "readOnly": true,
+      "summary": "Build a validated ADB/Fastboot/Forensics command line plus optional .a2r, .bat, .ps1, .sh, and schtasks commands."
+    },
+    {
+      "id": "android2rust_parse_command",
+      "readOnly": true,
+      "summary": "Parse a raw adb/fastboot command line or an .a2r recipe file path into a structured AndroidJob and validation diagnostics."
+    },
+    {
+      "id": "android2rust_decode_status",
+      "readOnly": true,
+      "summary": "Decode an Android/ADB/Fastboot exit code or status string (e.g., INSTALL_FAILED_*, DEVICE_UNAUTHORIZED, FASTBOOT_LOCKED)."
+    },
+    {
+      "id": "android2rust_profiles",
+      "readOnly": true,
+      "summary": "Manage saved persistent Android2Rust job profiles (list, get, save, delete)."
+    },
+    {
+      "id": "android2rust_inspect_artifact",
+      "readOnly": true,
+      "summary": "Run pure-Rust offline forensic inspection on a local .apk, .ab (optionally decrypted), SQLite .db, ABX, bugreport .zip, XML, directory, or log dump."
+    },
+    {
+      "id": "android2rust_dry_run",
+      "readOnly": true,
+      "summary": "Run a safe non-destructive pre-flight simulation (plus local artifact verification) without modifying connected Android devices."
+    },
+    {
+      "id": "android2rust_run",
+      "readOnly": false,
+      "summary": "Execute an ADB, Fastboot, or forensic job. Refuses destructive operations (flash, erase, format, unlock, uninstall, restore) unless confirm_destructive is true."
+    },
+    {
+      "id": "android2rust_report",
+      "readOnly": true,
+      "summary": "Generate an air-gapped offline HTML, JSON, Markdown, or timeline audit report from an artifact, log file, or dry-run job."
+    },
+    {
+      "id": "android2rust_mobile_file_search",
+      "readOnly": true,
+      "summary": "Search files across connected WPD/MTP devices or an offline synthetic directory fixture by wildcard/regex, size, date range, MIME/extension, with optional path-safe copy_out and Merkle-signed export."
+    },
+    {
+      "id": "android2rust_wpd_delete",
+      "readOnly": false,
+      "summary": "Delete an object on a connected WPD/MTP device. Mutating operation: requires AllowMutating policy and confirm_destructive=true."
+    },
+    {
+      "id": "android2rust_wpd_devices",
+      "readOnly": true,
+      "summary": "Enumerate connected Windows Portable Devices (WPD/MTP) or an offline synthetic directory fixture and their storages."
+    }
   ]
 }
